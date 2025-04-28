@@ -3,7 +3,9 @@ package main
 import (
 	"bufio"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"strconv"
@@ -53,32 +55,43 @@ func (cam *XU81Camera) ClosePort() error {
 	return nil
 }
 
-// readResponse reads and validates the camera response
+// readResponse now understands ACK/NAK and variable-length frames.
 func (cam *XU81Camera) readResponse() ([]byte, error) {
-	response := make([]byte, 256)
-	n, err := cam.serial.Read(response)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read response: %v", err)
-	}
+	const (
+		ack = 0x06
+		nak = 0x15
+	)
 
-	if n < 6 { // Minimum response length
-		return nil, fmt.Errorf("response too short: %d bytes", n)
-	}
+	var buf []byte
+	deadline := time.Now().Add(500 * time.Millisecond)
 
-	// Validate response format
-	if response[0] != 0xFE || response[n-1] != 0xEF {
-		return nil, fmt.Errorf("invalid response format")
-	}
+	for time.Now().Before(deadline) {
+		tmp := make([]byte, 32)
+		n, err := cam.serial.Read(tmp)
+		if err != nil && !errors.Is(err, io.EOF) {
+			return nil, fmt.Errorf("read error: %w", err)
+		}
+		if n == 0 {
+			continue
+		}
+		buf = append(buf, tmp[:n]...)
 
-	// Check the error-code bytes
-	// response[3] and [4] are ASCII hex for error flags
-	errCode := fmt.Sprintf("%02X%02X", response[3], response[4])
-	// "3030" means ASCII "00" => no error
-	if errCode != "3030" {
-		return nil, parseErrorCode(errCode)
+		switch buf[0] {
+		case ack:
+			return buf[:1], nil // success
+		case nak:
+			return nil, fmt.Errorf("NAK") // generic error; decode if needed
+		case 0xFE:
+			if buf[len(buf)-1] == 0xEF && len(buf) >= 6 {
+				// long status frame finished – validate error flags
+				if string(buf[3:5]) != "00" { // ASCII “00” = 0x30 0x30
+					return nil, parseErrorCode(fmt.Sprintf("%02X%02X", buf[3], buf[4]))
+				}
+				return buf, nil
+			}
+		}
 	}
-
-	return response[:n], nil
+	return nil, fmt.Errorf("timeout waiting for response")
 }
 
 type Command struct {
@@ -266,10 +279,11 @@ func (cam *XU81Camera) sendCommand(cmd Command, params []byte) ([]byte, error) {
 
 	resp, err := cam.readResponse()
 	if err != nil {
-		return nil, fmt.Errorf("command failed: %v", err)
+		return nil, fmt.Errorf("command failed: %w", err)
 	}
-	log.Printf("Received response: %X\n", resp)
-
+	if len(resp) == 1 && resp[0] == 0x06 {
+		return resp, nil // simple ACK, nothing more to print
+	}
 	return resp, nil
 }
 
