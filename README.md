@@ -110,6 +110,12 @@ Command Reference
 | `down` | Start tilting down |
 | `goto <pan> <tilt>` | Move to absolute position |
 | `getpos` | Get current pan/tilt position |
+| `drive <pan> <tilt> [zoom [focus]]` | Velocity-drive all axes at once (joystick-style) |
+
+**`drive` speeds** are signed −64..63 per axis; 0 stops the axis, magnitude sets
+speed. Directions: +pan = right, +tilt = up, +zoom = telephoto, +focus = near.
+`drive 0 0` stops everything; diagonal moves like `drive 20 20` are possible
+(unlike the single-axis `left`/`up` commands).
 
 **Position Ranges:**
 
@@ -122,6 +128,7 @@ Command Reference
 | --- | --- |
 | `panspeed <speed>` | Set pan speed (5-3000) |
 | `tiltspeed <speed>` | Set tilt speed (5-3000) |
+| `getspeed` | Get current pan/tilt speeds |
 
 **Speed Reference:**
 
@@ -137,6 +144,7 @@ Command Reference
 | `zoomwide` | Zoom to wide angle |
 | `zoomtele` | Zoom to telephoto |
 | `zoom <position>` | Set zoom position (0-238) |
+| `getzoom` | Get current zoom position |
 
 **Zoom Positions:**
 
@@ -161,7 +169,11 @@ Command Reference
 | Command | Description |
 | --- | --- |
 | `record <slot>` | Save position to slot (0-127) |
-| `recall <slot> [time]` | Move to preset (optional time 0-48s) |
+| `recall <slot> [time]` | Move to preset (time 0 = instant, or 2-48s) |
+
+**Note:** Recall movement is asynchronous — the command returns as soon as the
+camera accepts it. Use `wait` to block until the move completes. Sending
+`recall <slot> 0` while a timed recall is in progress cancels the movement.
 
 ### White Balance
 
@@ -209,8 +221,21 @@ Command Reference
 | `status` | Show camera status |
 | `extstatus` | Extended status info |
 | `info` | System information |
+| `wait [seconds]` | Block until motion/busy flags clear (default timeout 30s) |
 | `inithome` | Initialize to home position |
 | `initoriginal` | Initialize to last position |
+
+### JSON Output
+
+Pass the global `-json` flag to emit machine-readable output from `status`,
+`extstatus`, `getpos`, `getzoom`, `getspeed`, and `info`:
+
+bash
+
+```
+./ptz-control -json status | jq .PowerOn
+./ptz-control -json getpos          # {"pan":4500,"tilt":1000}
+```
 
 ### Maintenance (Outdoor Models)
 

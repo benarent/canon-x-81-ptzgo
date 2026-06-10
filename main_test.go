@@ -12,13 +12,20 @@ import (
 )
 
 // mockSerialPort is a scripted SerialPort: Read serves bytes from readBuf,
-// Write records each frame.
+// Write records each frame. For multi-command exchanges, each Write loads
+// the next queued answer from responseQueue into readBuf (command/answer).
 type mockSerialPort struct {
-	readBuf []byte
-	writes  [][]byte
+	readBuf       []byte
+	responseQueue [][]byte
+	writes        [][]byte
+	readErr       error
+	resets        int
 }
 
 func (m *mockSerialPort) Read(p []byte) (int, error) {
+	if m.readErr != nil {
+		return 0, m.readErr
+	}
 	if len(m.readBuf) == 0 {
 		return 0, nil // a read timeout returns no data and no error
 	}
@@ -31,11 +38,20 @@ func (m *mockSerialPort) Write(p []byte) (int, error) {
 	frame := make([]byte, len(p))
 	copy(frame, p)
 	m.writes = append(m.writes, frame)
+	if len(m.responseQueue) > 0 {
+		m.readBuf = append(m.readBuf, m.responseQueue[0]...)
+		m.responseQueue = m.responseQueue[1:]
+	}
 	return len(p), nil
 }
 
 func (m *mockSerialPort) Close() error                       { return nil }
 func (m *mockSerialPort) SetReadTimeout(time.Duration) error { return nil }
+
+func (m *mockSerialPort) ResetInputBuffer() error {
+	m.resets++
+	return nil
+}
 
 func newTestCamera(mock *mockSerialPort) *XU81Camera {
 	return &XU81Camera{
@@ -383,6 +399,106 @@ func TestGetSerialNumber(t *testing.T) {
 	}
 	if serial != "XU-80W2500000--" {
 		t.Errorf("got %q, want %q", serial, "XU-80W2500000--")
+	}
+}
+
+func TestSendCommandMarksDisconnected(t *testing.T) {
+	t.Run("read error disconnects", func(t *testing.T) {
+		mock := &mockSerialPort{readErr: errors.New("device unplugged")}
+		cam := newTestCamera(mock)
+		if err := cam.Stop(); err == nil {
+			t.Fatal("expected error on read failure")
+		}
+		cam.mu.Lock()
+		connected := cam.isConnected
+		cam.mu.Unlock()
+		if connected {
+			t.Error("camera should be marked disconnected after a read error")
+		}
+	})
+
+	t.Run("timeout keeps connection", func(t *testing.T) {
+		mock := &mockSerialPort{} // no answer at all
+		cam := newTestCamera(mock)
+		if err := cam.Stop(); err == nil {
+			t.Fatal("expected timeout error")
+		}
+		cam.mu.Lock()
+		connected := cam.isConnected
+		cam.mu.Unlock()
+		if !connected {
+			t.Error("a response timeout should not drop the serial connection")
+		}
+	})
+}
+
+func TestReadResponseTrailingGarbage(t *testing.T) {
+	frame := statusResponse("A00")
+	mock := &mockSerialPort{readBuf: append(append([]byte{}, frame...), 0x12, 0x34)}
+	cam := newTestCamera(mock)
+
+	resp, err := cam.readResponse()
+	if err != nil {
+		t.Fatalf("readResponse: %v", err)
+	}
+	if resp.Type != ResponseStatus {
+		t.Errorf("type = %v, want ResponseStatus", resp.Type)
+	}
+	if !bytes.Equal(resp.Data, frame) {
+		t.Errorf("data = %X, want first frame %X", resp.Data, frame)
+	}
+}
+
+func TestMoveShotMemoryDuration(t *testing.T) {
+	// Manual §11.7: valid movement times are 0 or 2-48 seconds
+	for _, d := range []int{1, -1, 49} {
+		cam := newTestCamera(&mockSerialPort{})
+		if err := cam.MoveShotMemory(1, d); err == nil {
+			t.Errorf("duration %d should be rejected", d)
+		}
+	}
+	for _, d := range []int{0, 2, 48} {
+		mock := &mockSerialPort{readBuf: []byte{ackByte}}
+		cam := newTestCamera(mock)
+		if err := cam.MoveShotMemory(1, d); err != nil {
+			t.Errorf("duration %d should be accepted: %v", d, err)
+		}
+	}
+}
+
+func TestDriveFraming(t *testing.T) {
+	mock := &mockSerialPort{readBuf: []byte{ackByte}}
+	cam := newTestCamera(mock)
+
+	// Max-speed pan right, everything else stopped.
+	// Wire order zoom, focus, tilt, pan: 64→"40", 64→"40", 63→"3F", 0→"00".
+	if err := cam.Drive(63, 0, 0, 0); err != nil {
+		t.Fatalf("Drive: %v", err)
+	}
+	want := []byte{0xFF, 0x30, 0x30, 0x01, 0x81, '4', '0', '4', '0', '3', 'F', '0', '0', 0xEF}
+	if len(mock.writes) != 1 || !bytes.Equal(mock.writes[0], want) {
+		t.Errorf("wrote %X, want %X", mock.writes, want)
+	}
+
+	if err := cam.Drive(64, 0, 0, 0); err == nil {
+		t.Error("speed 64 should be rejected")
+	}
+	if err := cam.Drive(0, 0, -65, 0); err == nil {
+		t.Error("speed -65 should be rejected")
+	}
+}
+
+func TestWaitIdle(t *testing.T) {
+	busy := statusResponse("00200") // Panning (b9)
+	idle := statusResponse("00000")
+	mock := &mockSerialPort{responseQueue: [][]byte{busy, idle}}
+	cam := newTestCamera(mock)
+
+	if err := cam.WaitIdle(2 * time.Second); err != nil {
+		t.Fatalf("WaitIdle: %v", err)
+	}
+	if len(mock.writes) != 2 {
+		t.Errorf("expected 2 status polls, got %d", len(mock.writes))
 	}
 }
 

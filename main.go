@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
 	"encoding/json"
@@ -99,6 +100,7 @@ func (cam *XU81Camera) DebugRawCommand(cmdName string, params []byte) error {
 	fmt.Printf("Sending %s: %X\n", cmd.name, cmdBytes)
 
 	if _, err := cam.serial.Write(cmdBytes); err != nil {
+		cam.markDisconnectedLocked()
 		return fmt.Errorf("write error: %w", err)
 	}
 
@@ -192,6 +194,7 @@ type SerialPort interface {
 	Write([]byte) (int, error)
 	Close() error
 	SetReadTimeout(time.Duration) error
+	ResetInputBuffer() error
 }
 
 // Command represents a camera command
@@ -230,7 +233,7 @@ type CameraStatus struct {
 	PanMotorError       bool
 	TiltMotorError      bool
 
-	Raw []byte
+	Raw []byte `json:"-"`
 }
 
 // SystemInfo represents system information
@@ -488,6 +491,10 @@ var commands = map[string]Command{
 		name: "ROM Version Request", code: "0188", paramLength: 0,
 		description: "Get ROM version", validator: nil,
 	},
+	"speed_control": {
+		name: "Zoom/Focus/Tilt/Pan Speed Control", code: "0181", paramLength: 8,
+		description: "Simultaneous velocity control of all axes", validator: validateDriveParam,
+	},
 	"shot_memory_record": {
 		name: "Shot Memory Recording", code: "0182", paramLength: 2,
 		description: "Record current position to shot memory", validator: validateShotMemoryParam,
@@ -606,6 +613,22 @@ func validateAutoIRParam(params []byte, model CameraModel) error {
 	return nil
 }
 
+func validateDriveParam(params []byte, model CameraModel) error {
+	if len(params) != 8 {
+		return errors.New("speed control command requires exactly 8 parameter bytes")
+	}
+	for i := 0; i < 8; i += 2 {
+		v, err := strconv.ParseUint(string(params[i:i+2]), 16, 8)
+		if err != nil {
+			return fmt.Errorf("invalid speed control parameter %q: %w", params[i:i+2], err)
+		}
+		if v > 0x7F {
+			return errors.New("speed control axis values must be 00h-7Fh")
+		}
+	}
+	return nil
+}
+
 func validateShotMemoryParam(params []byte, model CameraModel) error {
 	if len(params) != 2 {
 		return errors.New("shot memory command requires exactly 2 parameter bytes")
@@ -657,6 +680,17 @@ func (cam *XU81Camera) ensureConnectedLocked() error {
 		return cam.openPort()
 	}
 	return nil
+}
+
+// markDisconnectedLocked drops the serial connection after an I/O error so
+// the next command reopens the port (e.g. after a USB adapter re-enumerates).
+// Caller must hold cam.mu.
+func (cam *XU81Camera) markDisconnectedLocked() {
+	if cam.serial != nil {
+		_ = cam.serial.Close()
+	}
+	cam.serial = nil
+	cam.isConnected = false
 }
 
 // openPort opens the serial connection to the camera
@@ -748,6 +782,10 @@ func (cam *XU81Camera) parseResponse(data []byte) Response {
 	return Response{Type: ResponseError, Error: fmt.Errorf("unknown response format: %X", data)}
 }
 
+// errResponseTimeout is returned when the camera does not answer in time.
+// It indicates an absent or busy camera, not a broken serial link.
+var errResponseTimeout = errors.New("timeout waiting for response")
+
 // readResponse reads and parses the camera response
 func (cam *XU81Camera) readResponse() (Response, error) {
 	var buf []byte
@@ -773,12 +811,16 @@ func (cam *XU81Camera) readResponse() (Response, error) {
 		if len(buf) > 0 && (buf[0] == ackByte || buf[0] == nakByte) {
 			return cam.parseResponse(buf[:1]), nil
 		}
-		if len(buf) >= 6 && buf[0] == responseHeader && buf[len(buf)-1] == endMarkByte {
-			return cam.parseResponse(buf), nil
+		if buf[0] == responseHeader {
+			// Accept the first complete frame; stale trailing bytes are
+			// dropped rather than poisoning this and later responses.
+			if i := bytes.IndexByte(buf, endMarkByte); i >= 5 {
+				return cam.parseResponse(buf[:i+1]), nil
+			}
 		}
 	}
 
-	return Response{}, errors.New("timeout waiting for response")
+	return Response{}, errResponseTimeout
 }
 
 // CameraError is a decoded camera error-flag answer.
@@ -868,15 +910,25 @@ func (cam *XU81Camera) sendCommand(cmd Command, params []byte) (Response, error)
 		return Response{}, fmt.Errorf("connection error: %w", err)
 	}
 
+	// Drop stale bytes from previous timeouts before transmitting — the
+	// protocol is strictly command/answer, so the buffer must be empty.
+	_ = cam.serial.ResetInputBuffer()
+
 	cmdBytes := formatCommandBytes(cmd, params)
 
 	cam.logger.Printf("Sending command %s: %X", cmd.name, cmdBytes)
 	if _, err := cam.serial.Write(cmdBytes); err != nil {
+		cam.markDisconnectedLocked()
 		return Response{}, fmt.Errorf("failed to send command: %w", err)
 	}
 
 	resp, err := cam.readResponse()
 	if err != nil {
+		// A timeout means the camera didn't answer; the link itself is
+		// fine. Anything else is an I/O error — reopen on next command.
+		if !errors.Is(err, errResponseTimeout) {
+			cam.markDisconnectedLocked()
+		}
 		return Response{}, fmt.Errorf("command %s failed: %w", cmd.name, err)
 	}
 	if resp.Error != nil {
@@ -950,6 +1002,31 @@ func (cam *XU81Camera) TiltUp() error {
 func (cam *XU81Camera) TiltDown() error {
 	c := commands["tilt_down"]
 	_, err := cam.sendCommand(c, []byte{0x34}) // ASCII '4'
+	return err
+}
+
+// Drive operates all four axes at once with signed velocities — the joystick
+// command (manual §11.5, 0181h). Speeds are -64..63 where 0 stops the axis
+// and magnitude sets speed: +pan = right, +tilt = up, +zoom = tele,
+// +focus = near. Drive(0, 0, 0, 0) stops all axes.
+func (cam *XU81Camera) Drive(pan, tilt, zoom, focus int) error {
+	for _, v := range []int{pan, tilt, zoom, focus} {
+		if v < -64 || v > 63 {
+			return errors.New("axis speeds must be between -64 and 63")
+		}
+	}
+
+	// Wire encoding is 0-127 per axis with 63/64 as stop. Pan/tilt count
+	// down from 63 (manual: 0 = max right / max top), zoom/focus count up
+	// from 64 (127 = max tele side / max near side).
+	// Wire order per manual: zoom, focus, tilt, pan.
+	params := intToASCIIHex(64+zoom, 2)
+	params = append(params, intToASCIIHex(64+focus, 2)...)
+	params = append(params, intToASCIIHex(63-tilt, 2)...)
+	params = append(params, intToASCIIHex(63-pan, 2)...)
+
+	c := commands["speed_control"]
+	_, err := cam.sendCommand(c, params)
 	return err
 }
 
@@ -1114,6 +1191,29 @@ func (cam *XU81Camera) GetExtendedStatus() (*CameraStatus, error) {
 	return status, nil
 }
 
+const waitIdlePollInterval = 250 * time.Millisecond
+
+// WaitIdle polls the extended status until the camera reports no motion or
+// busy state, or the timeout elapses. Useful after recall/goto, which return
+// as soon as the camera accepts the command (movement is asynchronous).
+func (cam *XU81Camera) WaitIdle(timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for {
+		status, err := cam.GetExtendedStatus()
+		if err != nil {
+			return err
+		}
+		if !status.CameraBusy && !status.Panning && !status.Tilting &&
+			!status.Zooming && !status.Focusing {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("camera still busy after %s", timeout)
+		}
+		time.Sleep(waitIdlePollInterval)
+	}
+}
+
 func (cam *XU81Camera) GetSystemInfo() (*SystemInfo, error) {
 	info := &SystemInfo{}
 
@@ -1182,12 +1282,15 @@ func (cam *XU81Camera) RecordShotMemory(slot int) error {
 	return err
 }
 
+// MoveShotMemory moves to a stored preset over the given duration.
+// Per manual §11.7 valid movement times are 0 (instant) or 2-48 seconds;
+// sending duration 0 again while a move is in progress cancels it.
 func (cam *XU81Camera) MoveShotMemory(slot int, duration int) error {
 	if slot < 0 || slot > 127 {
 		return errors.New("shot memory slot must be 0-127")
 	}
-	if duration < 0 || duration > 48 {
-		return errors.New("duration must be 0-48 seconds")
+	if duration != 0 && (duration < 2 || duration > 48) {
+		return errors.New("duration must be 0 (instant) or 2-48 seconds")
 	}
 
 	c := commands["shot_memory_move"]
@@ -1503,6 +1606,9 @@ type CLICommand struct {
 	Description string
 }
 
+// jsonOutput switches status/position commands to JSON (set by the -json flag)
+var jsonOutput bool
+
 // Enhanced CLI commands
 var cliCommands = map[string]CLICommand{
 	// Power commands
@@ -1562,6 +1668,22 @@ var cliCommands = map[string]CLICommand{
 		Description: "Start tilting down",
 	},
 
+	"drive": {
+		Name: "drive", Usage: "drive <pan> <tilt> [zoom [focus]]", MinArgs: 2, MaxArgs: 4,
+		Handler: func(cam *XU81Camera, args []string) error {
+			speeds := make([]int, 4)
+			for i, arg := range args {
+				v, err := strconv.Atoi(arg)
+				if err != nil {
+					return fmt.Errorf("invalid speed %q: %w", arg, err)
+				}
+				speeds[i] = v
+			}
+			return cam.Drive(speeds[0], speeds[1], speeds[2], speeds[3])
+		},
+		Description: "Velocity-drive all axes (-64..63 each, 0=stop): +pan=right +tilt=up +zoom=tele +focus=near",
+	},
+
 	// Position commands
 	"goto": {
 		Name: "goto", Usage: "goto <pan> <tilt>", MinArgs: 2, MaxArgs: 2,
@@ -1585,10 +1707,62 @@ var cliCommands = map[string]CLICommand{
 			if err != nil {
 				return err
 			}
+			if jsonOutput {
+				return json.NewEncoder(os.Stdout).Encode(map[string]int{"pan": pan, "tilt": tilt})
+			}
 			fmt.Printf("Position: Pan=%d, Tilt=%d\n", pan, tilt)
 			return nil
 		},
 		Description: "Get current pan/tilt position",
+	},
+	"getzoom": {
+		Name: "getzoom", Usage: "getzoom", MinArgs: 0, MaxArgs: 0,
+		Handler: func(cam *XU81Camera, args []string) error {
+			pos, err := cam.GetZoomPosition()
+			if err != nil {
+				return err
+			}
+			if jsonOutput {
+				return json.NewEncoder(os.Stdout).Encode(map[string]int{"zoom": pos})
+			}
+			fmt.Printf("Zoom position: %d\n", pos)
+			return nil
+		},
+		Description: "Get current zoom position",
+	},
+	"getspeed": {
+		Name: "getspeed", Usage: "getspeed", MinArgs: 0, MaxArgs: 0,
+		Handler: func(cam *XU81Camera, args []string) error {
+			panSpeed, err := cam.GetPanSpeed()
+			if err != nil {
+				return err
+			}
+			tiltSpeed, err := cam.GetTiltSpeed()
+			if err != nil {
+				return err
+			}
+			if jsonOutput {
+				return json.NewEncoder(os.Stdout).Encode(map[string]int{"pan_speed": panSpeed, "tilt_speed": tiltSpeed})
+			}
+			fmt.Printf("Speed: Pan=%d, Tilt=%d\n", panSpeed, tiltSpeed)
+			return nil
+		},
+		Description: "Get current pan/tilt speeds",
+	},
+	"wait": {
+		Name: "wait", Usage: "wait [seconds]", MinArgs: 0, MaxArgs: 1,
+		Handler: func(cam *XU81Camera, args []string) error {
+			timeout := 30 * time.Second
+			if len(args) > 0 {
+				secs, err := strconv.Atoi(args[0])
+				if err != nil || secs <= 0 {
+					return fmt.Errorf("invalid timeout: %s", args[0])
+				}
+				timeout = time.Duration(secs) * time.Second
+			}
+			return cam.WaitIdle(timeout)
+		},
+		Description: "Wait until camera motion and busy flags clear (default timeout 30s)",
 	},
 
 	// Zoom commands
@@ -1807,6 +1981,9 @@ var cliCommands = map[string]CLICommand{
 			if err != nil {
 				return err
 			}
+			if jsonOutput {
+				return json.NewEncoder(os.Stdout).Encode(status)
+			}
 			fmt.Printf("Status:\n")
 			fmt.Printf("  Power: %v\n", status.PowerOn)
 			fmt.Printf("  Panning: %v\n", status.Panning)
@@ -1826,6 +2003,9 @@ var cliCommands = map[string]CLICommand{
 			if err != nil {
 				return err
 			}
+			if jsonOutput {
+				return json.NewEncoder(os.Stdout).Encode(status)
+			}
 			fmt.Printf("Extended Status:\n")
 			fmt.Printf("  Power: %v\n", status.PowerOn)
 			fmt.Printf("  Camera Busy: %v\n", status.CameraBusy)
@@ -1844,6 +2024,9 @@ var cliCommands = map[string]CLICommand{
 			info, err := cam.GetSystemInfo()
 			if err != nil {
 				return err
+			}
+			if jsonOutput {
+				return json.NewEncoder(os.Stdout).Encode(info)
 			}
 			fmt.Printf("System Information:\n")
 			fmt.Printf("  Product: %s\n", info.ProductName)
@@ -1983,7 +2166,9 @@ func run() int {
 	// ---- 1. global flags ----
 	cfgFile := flag.String("config", "", "Path to JSON config")
 	verbose := flag.Bool("v", false, "Verbose logging")
+	jsonFlag := flag.Bool("json", false, "JSON output for status/position commands")
 	flag.Parse()
+	jsonOutput = *jsonFlag
 
 	// ---- 2. config & logger ----
 	cfg, err := LoadConfig(*cfgFile)
