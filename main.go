@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -9,9 +10,12 @@ import (
 	"io"
 	"log"
 	"os"
+	"os/signal"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/peterh/liner"
@@ -48,14 +52,6 @@ const (
 	ModelXU81
 )
 
-// Digital zoom modes (XU-81 only)
-type DigitalZoomMode int
-
-const (
-	OpticalInterlocking DigitalZoomMode = iota
-	Independent
-)
-
 // Shooting modes
 type ShootingMode int
 
@@ -79,24 +75,23 @@ const (
 
 // Config holds the camera configuration
 type Config struct {
-	Port             string          `json:"port"`
-	BaudRate         int             `json:"baud_rate"`
-	ReadTimeout      time.Duration   `json:"read_timeout"`
-	PowerOnDelay     time.Duration   `json:"power_on_delay"`
-	DefaultPanSpeed  int             `json:"default_pan_speed"`
-	DefaultTiltSpeed int             `json:"default_tilt_speed"`
-	CameraModel      CameraModel     `json:"camera_model"`
-	DigitalZoomMode  DigitalZoomMode `json:"digital_zoom_mode"`
+	Port         string        `json:"port"`
+	BaudRate     int           `json:"baud_rate"`
+	ReadTimeout  time.Duration `json:"read_timeout"`
+	PowerOnDelay time.Duration `json:"power_on_delay"`
+	CameraModel  CameraModel   `json:"camera_model"`
 }
 
-// Add this method to your XU81Camera struct (anywhere after the struct definition):
+// DebugRawCommand sends a named command and dumps the raw request/response bytes.
 func (cam *XU81Camera) DebugRawCommand(cmdName string, params []byte) error {
 	cmd, ok := commands[cmdName]
 	if !ok {
 		return fmt.Errorf("unknown command: %s", cmdName)
 	}
 
-	if err := cam.ensureConnected(); err != nil {
+	cam.mu.Lock()
+	defer cam.mu.Unlock()
+	if err := cam.ensureConnectedLocked(); err != nil {
 		return err
 	}
 
@@ -107,8 +102,9 @@ func (cam *XU81Camera) DebugRawCommand(cmdName string, params []byte) error {
 		return fmt.Errorf("write error: %w", err)
 	}
 
-	// Read response with timeout
+	// Read response with a longer timeout, restoring the configured one after
 	cam.serial.SetReadTimeout(500 * time.Millisecond)
+	defer cam.serial.SetReadTimeout(cam.config.ReadTimeout)
 
 	totalRead := 0
 	var fullResponse []byte
@@ -167,12 +163,11 @@ func (cam *XU81Camera) DebugRawCommand(cmdName string, params []byte) error {
 // LoadConfig loads configuration from a file
 func LoadConfig(filename string) (*Config, error) {
 	cfg := &Config{
-		Port:            "/dev/ttyUSB0",
-		BaudRate:        9600,
-		ReadTimeout:     defaultReadTimeout,
-		PowerOnDelay:    powerOnBootDelay,
-		CameraModel:     ModelXU81,
-		DigitalZoomMode: OpticalInterlocking,
+		Port:         "/dev/ttyUSB0",
+		BaudRate:     9600,
+		ReadTimeout:  defaultReadTimeout,
+		PowerOnDelay: powerOnBootDelay,
+		CameraModel:  ModelXU81,
 	}
 
 	if filename == "" {
@@ -181,7 +176,7 @@ func LoadConfig(filename string) (*Config, error) {
 
 	data, err := os.ReadFile(filename)
 	if err != nil {
-		return cfg, err
+		return nil, err
 	}
 
 	if err := json.Unmarshal(data, &cfg); err != nil {
@@ -235,16 +230,7 @@ type CameraStatus struct {
 	PanMotorError       bool
 	TiltMotorError      bool
 
-	// Detailed status
-	PanPosition   int
-	TiltPosition  int
-	ZoomPosition  int
-	FocusPosition int
-	ShootingMode  ShootingMode
-	IRFilter      bool
-	WDR           bool
-	NDFilter      bool
-	Raw           []byte
+	Raw []byte
 }
 
 // SystemInfo represents system information
@@ -253,14 +239,6 @@ type SystemInfo struct {
 	ROMVersion    string
 	SerialNumber  string
 	CameraVersion int
-}
-
-// ShotMemory represents a shot memory preset
-type ShotMemory struct {
-	PanPosition   int
-	TiltPosition  int
-	ZoomPosition  int
-	FocusPosition int
 }
 
 // Camera interface for better testability
@@ -284,9 +262,7 @@ type Camera interface {
 
 	// Camera control
 	SetShootingMode(ShootingMode) error
-	GetShootingMode() (ShootingMode, error)
 	SetWhiteBalance(mode int) error
-	GetWhiteBalance() (int, error)
 
 	// Status
 	GetStatus() (*CameraStatus, error)
@@ -309,6 +285,8 @@ type XU81Camera struct {
 	mu          sync.Mutex
 	config      *Config
 }
+
+var _ Camera = (*XU81Camera)(nil)
 
 // NewXU81Camera creates a new camera controller instance
 func NewXU81Camera(config *Config, logger *log.Logger) *XU81Camera {
@@ -622,6 +600,9 @@ func validateAutoIRParam(params []byte, model CameraModel) error {
 	if len(params) != 1 {
 		return errors.New("auto IR command requires exactly 1 parameter byte")
 	}
+	if params[0] < 0x30 || params[0] > 0x32 { // ASCII '0'-'2'
+		return errors.New("auto IR parameter must be 0 (off), 1 (slow shutter), or 2 (gain)")
+	}
 	return nil
 }
 
@@ -658,20 +639,20 @@ func signedIntToHex(value int) []byte {
 	return []byte(hexStr)
 }
 
-func hexToSignedInt(data []byte) int {
+func hexToSignedInt(data []byte) (int, error) {
 	if len(data) != 4 {
-		return 0
+		return 0, fmt.Errorf("expected 4 hex digits, got %d", len(data))
 	}
-	hexStr := string(data)
-	unsigned, _ := strconv.ParseUint(hexStr, 16, 16)
-	return int(unsigned) - 0x8000
+	unsigned, err := strconv.ParseUint(string(data), 16, 16)
+	if err != nil {
+		return 0, fmt.Errorf("invalid hex value %q: %w", data, err)
+	}
+	return int(unsigned) - 0x8000, nil
 }
 
-// ensureConnected ensures the serial port is connected
-func (cam *XU81Camera) ensureConnected() error {
-	cam.mu.Lock()
-	defer cam.mu.Unlock()
-
+// ensureConnectedLocked ensures the serial port is connected.
+// Caller must hold cam.mu.
+func (cam *XU81Camera) ensureConnectedLocked() error {
 	if !cam.isConnected || cam.serial == nil {
 		return cam.openPort()
 	}
@@ -735,7 +716,6 @@ func formatCommandBytes(cmd Command, params []byte) []byte {
 }
 
 // parseResponse parses the raw response bytes
-// Update your parseResponse function:
 func (cam *XU81Camera) parseResponse(data []byte) Response {
 	if len(data) == 0 {
 		return Response{Type: ResponseError, Error: errors.New("empty response")}
@@ -758,10 +738,9 @@ func (cam *XU81Camera) parseResponse(data []byte) Response {
 					Data:      data, // Include the full data even on error
 				}
 			}
-			// Success case - include the full response data
 			return Response{
 				Type: ResponseStatus,
-				Data: data, // This was missing!
+				Data: data,
 			}
 		}
 	}
@@ -785,6 +764,11 @@ func (cam *XU81Camera) readResponse() (Response, error) {
 		}
 		buf = append(buf, tmp[:n]...)
 
+		// Discard leading garbage until a valid response start byte
+		for len(buf) > 0 && buf[0] != ackByte && buf[0] != nakByte && buf[0] != responseHeader {
+			buf = buf[1:]
+		}
+
 		// Check for complete response
 		if len(buf) > 0 && (buf[0] == ackByte || buf[0] == nakByte) {
 			return cam.parseResponse(buf[:1]), nil
@@ -797,58 +781,91 @@ func (cam *XU81Camera) readResponse() (Response, error) {
 	return Response{}, errors.New("timeout waiting for response")
 }
 
-// parseErrorCode interprets the camera's ASCII-hex error flags
-func parseErrorCode(code string) error {
-	if code == "3030" { // ASCII "00"
-		return nil
-	}
-
-	// Parse ASCII hex error code
-	var errs []string
-
-	if len(code) >= 2 {
-		// First byte (MSB)
-		firstChar := code[0]
-		if firstChar >= '8' || (firstChar >= '4' && firstChar <= '7') {
-			errs = append(errs, "Mode Error")
-		}
-		if firstChar == '5' || firstChar == '7' || firstChar == 'D' || firstChar == 'F' {
-			errs = append(errs, "Parameter Error")
-		}
-		if firstChar == '3' || firstChar == '7' || firstChar == 'B' || firstChar == 'F' {
-			errs = append(errs, "Command Error")
-		}
-		if firstChar == '1' || firstChar == '3' || firstChar == '5' || firstChar == '7' ||
-			firstChar == '9' || firstChar == 'B' || firstChar == 'D' || firstChar == 'F' {
-			errs = append(errs, "Busy")
-		}
-	}
-
-	if len(code) >= 2 {
-		// Second byte (LSB)
-		secondChar := code[1]
-		if secondChar == '1' || secondChar == '3' || secondChar == '5' || secondChar == '7' ||
-			secondChar == '9' || secondChar == 'B' || secondChar == 'D' || secondChar == 'F' {
-			errs = append(errs, "System Error")
-		}
-	}
-
-	if len(errs) == 0 {
-		return fmt.Errorf("unknown error code: %s", code)
-	}
-	return fmt.Errorf("camera errors: %s", strings.Join(errs, ", "))
+// CameraError is a decoded camera error-flag answer.
+// Per Programmer's Manual §5.2: first digit b3=Mode Error, b2=Parameter Error,
+// b1=Command Error, b0=Busy; second digit b0=System Error (b1-b3 reserved).
+// The camera sets Busy alongside every other flag, so transient failures can
+// be detected with IsBusy and retried.
+type CameraError struct {
+	Code      string // the two ASCII-hex digits as received
+	Mode      bool
+	Parameter bool
+	Command   bool
+	Busy      bool
+	System    bool
 }
 
-// sendCommand sends a command to the camera and returns the response
-func (cam *XU81Camera) sendCommand(cmd Command, params []byte) (Response, error) {
-	if err := cam.ensureConnected(); err != nil {
-		return Response{}, fmt.Errorf("connection error: %w", err)
+func (e *CameraError) Error() string {
+	var errs []string
+	if e.Mode {
+		errs = append(errs, "Mode Error")
+	}
+	if e.Parameter {
+		errs = append(errs, "Parameter Error")
+	}
+	if e.Command {
+		errs = append(errs, "Command Error")
+	}
+	if e.Busy {
+		errs = append(errs, "Busy")
+	}
+	if e.System {
+		errs = append(errs, "System Error")
+	}
+	return fmt.Sprintf("camera errors: %s", strings.Join(errs, ", "))
+}
+
+// IsBusy reports whether err carries a camera answer with the Busy flag set.
+func IsBusy(err error) bool {
+	if e, ok := errors.AsType[*CameraError](err); ok {
+		return e.Busy
+	}
+	return false
+}
+
+// parseErrorCode interprets the camera's two ASCII-hex error-flag digits.
+func parseErrorCode(code string) error {
+	if len(code) != 2 {
+		return fmt.Errorf("malformed error code: %q", code)
+	}
+	hi, err := strconv.ParseUint(code[:1], 16, 8)
+	if err != nil {
+		return fmt.Errorf("malformed error code: %q", code)
+	}
+	lo, err := strconv.ParseUint(code[1:], 16, 8)
+	if err != nil {
+		return fmt.Errorf("malformed error code: %q", code)
 	}
 
+	camErr := &CameraError{
+		Code:      code,
+		Mode:      hi&0x8 != 0,
+		Parameter: hi&0x4 != 0,
+		Command:   hi&0x2 != 0,
+		Busy:      hi&0x1 != 0,
+		System:    lo&0x1 != 0,
+	}
+	if !camErr.Mode && !camErr.Parameter && !camErr.Command && !camErr.Busy && !camErr.System {
+		return fmt.Errorf("unknown error code: %s", code)
+	}
+	return camErr
+}
+
+// sendCommand sends a command to the camera and returns the response.
+// The whole write/read transaction holds cam.mu — the protocol is
+// half-duplex, so commands must never interleave on the wire.
+func (cam *XU81Camera) sendCommand(cmd Command, params []byte) (Response, error) {
 	if cmd.validator != nil {
 		if err := cmd.validator(params, cam.config.CameraModel); err != nil {
 			return Response{}, fmt.Errorf("parameter validation failed: %w", err)
 		}
+	}
+
+	cam.mu.Lock()
+	defer cam.mu.Unlock()
+
+	if err := cam.ensureConnectedLocked(); err != nil {
+		return Response{}, fmt.Errorf("connection error: %w", err)
 	}
 
 	cmdBytes := formatCommandBytes(cmd, params)
@@ -861,6 +878,10 @@ func (cam *XU81Camera) sendCommand(cmd Command, params []byte) (Response, error)
 	resp, err := cam.readResponse()
 	if err != nil {
 		return Response{}, fmt.Errorf("command %s failed: %w", cmd.name, err)
+	}
+	if resp.Error != nil {
+		// The camera answered with a NAK or an error code
+		return resp, fmt.Errorf("command %s: %w", cmd.name, resp.Error)
 	}
 
 	return resp, nil
@@ -891,6 +912,21 @@ func (cam *XU81Camera) Stop() error {
 	c := commands["pan_stop"]
 	_, err := cam.sendCommand(c, []byte{paramOff})
 	return err
+}
+
+// BestEffortStop halts pan/tilt movement if a connection was ever
+// established. Used on exit paths so a dying process doesn't leave
+// the head moving.
+func (cam *XU81Camera) BestEffortStop() {
+	cam.mu.Lock()
+	connected := cam.isConnected
+	cam.mu.Unlock()
+	if !connected {
+		return
+	}
+	if err := cam.Stop(); err != nil {
+		cam.logger.Printf("auto-stop failed: %v", err)
+	}
 }
 
 func (cam *XU81Camera) PanRight() error {
@@ -947,11 +983,14 @@ func (cam *XU81Camera) GetPanTiltPosition() (pan, tilt int, err error) {
 	}
 
 	// Extract position data (bytes 5-12, ASCII hex)
-	panData := resp.Data[5:9]
-	tiltData := resp.Data[9:13]
-
-	pan = hexToSignedInt(panData)
-	tilt = hexToSignedInt(tiltData)
+	pan, err = hexToSignedInt(resp.Data[5:9])
+	if err != nil {
+		return 0, 0, fmt.Errorf("pan position: %w", err)
+	}
+	tilt, err = hexToSignedInt(resp.Data[9:13])
+	if err != nil {
+		return 0, 0, fmt.Errorf("tilt position: %w", err)
+	}
 
 	return pan, tilt, nil
 }
@@ -990,12 +1029,6 @@ func (cam *XU81Camera) SetShootingMode(mode ShootingMode) error {
 	return err
 }
 
-func (cam *XU81Camera) GetShootingMode() (ShootingMode, error) {
-	// This would require implementing the status request command for shooting mode
-	// For now, return a placeholder
-	return ShootingAuto, errors.New("not implemented")
-}
-
 func (cam *XU81Camera) SetWhiteBalance(mode int) error {
 	if mode < 0 || mode > 4 {
 		return errors.New("white balance mode must be 0-4")
@@ -1004,11 +1037,6 @@ func (cam *XU81Camera) SetWhiteBalance(mode int) error {
 	param := byte(0x30 + mode) // Convert to ASCII
 	_, err := cam.sendCommand(c, []byte{param})
 	return err
-}
-
-func (cam *XU81Camera) GetWhiteBalance() (int, error) {
-	// This would require implementing the status request command
-	return 0, errors.New("not implemented")
 }
 
 // Status methods
@@ -1089,39 +1117,58 @@ func (cam *XU81Camera) GetExtendedStatus() (*CameraStatus, error) {
 func (cam *XU81Camera) GetSystemInfo() (*SystemInfo, error) {
 	info := &SystemInfo{}
 
-	// Get product name
-	if c, ok := commands["product_name"]; ok {
-		resp, err := cam.sendCommand(c, nil)
-		if err == nil && resp.Type == ResponseStatus && len(resp.Data) > 5 {
-			// Extract product name from response
-			nameData := resp.Data[5 : len(resp.Data)-1] // Exclude end mark
-			info.ProductName = string(nameData)
-		}
+	resp, err := cam.sendCommand(commands["product_name"], nil)
+	if err != nil {
+		return nil, fmt.Errorf("product name request: %w", err)
 	}
+	if resp.Type != ResponseStatus || len(resp.Data) < 7 {
+		return nil, errors.New("invalid product name response")
+	}
+	info.ProductName = string(resp.Data[5 : len(resp.Data)-1]) // exclude end mark
 
-	// Get ROM version
-	if c, ok := commands["rom_version"]; ok {
-		resp, err := cam.sendCommand(c, nil)
-		if err == nil && resp.Type == ResponseStatus && len(resp.Data) > 5 {
-			// Extract ROM version from response
-			versionData := resp.Data[5 : len(resp.Data)-1] // Exclude end mark
-			info.ROMVersion = string(versionData)
-		}
+	resp, err = cam.sendCommand(commands["rom_version"], nil)
+	if err != nil {
+		return nil, fmt.Errorf("ROM version request: %w", err)
 	}
+	if resp.Type != ResponseStatus || len(resp.Data) < 7 {
+		return nil, errors.New("invalid ROM version response")
+	}
+	info.ROMVersion = string(resp.Data[5 : len(resp.Data)-1])
 
-	// Get camera version
-	if c, ok := commands["camera_version"]; ok {
-		resp, err := cam.sendCommand(c, []byte{paramOff})
-		if err == nil && resp.Type == ResponseStatus && len(resp.Data) >= 7 {
-			// Extract camera version (2-byte ASCII hex)
-			versionData := resp.Data[5:7]
-			if version, err := asciiHexToInt(versionData); err == nil {
-				info.CameraVersion = version
-			}
-		}
+	resp, err = cam.sendCommand(commands["camera_version"], []byte{paramOff})
+	if err != nil {
+		return nil, fmt.Errorf("camera version request: %w", err)
 	}
+	if resp.Type != ResponseStatus || len(resp.Data) < 7 {
+		return nil, errors.New("invalid camera version response")
+	}
+	version, err := asciiHexToInt(resp.Data[5:7])
+	if err != nil {
+		return nil, fmt.Errorf("camera version parse: %w", err)
+	}
+	info.CameraVersion = version
+
+	serial, err := cam.GetSerialNumber()
+	if err != nil {
+		return nil, fmt.Errorf("serial number request: %w", err)
+	}
+	info.SerialNumber = serial
 
 	return info, nil
+}
+
+// GetSerialNumber returns the 15-character serial number information string
+// (model name, product code, serial number, reserve).
+func (cam *XU81Camera) GetSerialNumber() (string, error) {
+	c := commands["serial_number"]
+	resp, err := cam.sendCommand(c, []byte{paramOff})
+	if err != nil {
+		return "", err
+	}
+	if resp.Type != ResponseStatus || len(resp.Data) < 7 {
+		return "", errors.New("invalid serial number response")
+	}
+	return string(resp.Data[5 : len(resp.Data)-1]), nil
 }
 
 // Shot memory methods
@@ -1256,6 +1303,62 @@ func (cam *XU81Camera) DebugFocusControl() error {
 	}
 
 	return nil
+}
+
+// Exposure controls
+// SetShutterSpeed assigns the shutter speed (0=2s, 1=1/15, 2=1/60, 3=1/100,
+// 4=1/1000 at 59.94). Requires Manual or Shutter Priority shooting mode.
+func (cam *XU81Camera) SetShutterSpeed(val int) error {
+	if val < 0 || val > 4 {
+		return errors.New("shutter speed must be 0-4")
+	}
+	c := commands["shutter_speed"]
+	_, err := cam.sendCommand(c, []byte{byte(0x30 + val)})
+	return err
+}
+
+// SetGain assigns the camera gain (0=0dB, 1=6dB, 2=12dB, 3=18dB, 4=24dB,
+// 5=32dB XU-80 / 42dB XU-81). Requires Manual shooting mode.
+func (cam *XU81Camera) SetGain(val int) error {
+	if val < 0 || val > 5 {
+		return errors.New("gain must be 0-5")
+	}
+	c := commands["gain_assignment"]
+	_, err := cam.sendCommand(c, []byte{byte(0x30 + val)})
+	return err
+}
+
+// SetIris assigns the iris position (0-255; higher is brighter).
+// Requires Manual or Iris Priority shooting mode.
+func (cam *XU81Camera) SetIris(val int) error {
+	if val < 0 || val > 255 {
+		return errors.New("iris must be 0-255")
+	}
+	c := commands["iris_assignment"]
+	_, err := cam.sendCommand(c, intToASCIIHex(val, 2))
+	return err
+}
+
+// SetDigitalZoom assigns the digital zoom magnification in 0.1x steps above
+// 1.0x: value = (magnification-1.0)*10, range 0-110 (1.0x-12.0x).
+// XU-81 only; requires the Independent digital zoom mode (SW5).
+func (cam *XU81Camera) SetDigitalZoom(val int) error {
+	if val < 0 || val > 110 {
+		return errors.New("digital zoom must be 0-110 ((magnification-1.0)*10)")
+	}
+	c := commands["digital_zoom"]
+	_, err := cam.sendCommand(c, intToASCIIHex(val, 2))
+	return err
+}
+
+// Auto IR filter control (Night mode only): 0=off, 1=on slow shutter, 2=on gain.
+func (cam *XU81Camera) SetAutoIR(mode int) error {
+	if mode < 0 || mode > 2 {
+		return errors.New("auto IR mode must be 0-2")
+	}
+	c := commands["auto_ir"]
+	_, err := cam.sendCommand(c, []byte{byte(0x30 + mode)})
+	return err
 }
 
 // Filter and enhancement controls
@@ -1544,58 +1647,66 @@ var cliCommands = map[string]CLICommand{
 		Handler:     func(cam *XU81Camera, args []string) error { return cam.DebugFocusControl() },
 		Description: "Debug focus control issues",
 	},
-	// Add this debug command to your cliCommands map:
-	"rawcmd": {
-		Name: "rawcmd", Usage: "rawcmd <command_name> [params...]", MinArgs: 1, MaxArgs: 10,
+	// Exposure commands
+	"shutter": {
+		Name: "shutter", Usage: "shutter <0-4>", MinArgs: 1, MaxArgs: 1,
 		Handler: func(cam *XU81Camera, args []string) error {
-			cmdName := args[0]
-			cmd, ok := commands[cmdName]
-			if !ok {
-				return fmt.Errorf("unknown command: %s", cmdName)
+			val, err := strconv.Atoi(args[0])
+			if err != nil {
+				return fmt.Errorf("invalid shutter value: %w", err)
 			}
-
-			var params []byte
-			if len(args) > 1 {
-				// Parse params as hex bytes
-				for i := 1; i < len(args); i++ {
-					val, err := strconv.ParseUint(args[i], 16, 8)
-					if err != nil {
-						return fmt.Errorf("invalid hex param: %s", args[i])
-					}
-					params = append(params, byte(val))
-				}
-			}
-
-			// Send command with extra debugging
-			if err := cam.ensureConnected(); err != nil {
-				return err
-			}
-
-			cmdBytes := formatCommandBytes(cmd, params)
-			fmt.Printf("Sending: %X\n", cmdBytes)
-
-			if _, err := cam.serial.Write(cmdBytes); err != nil {
-				return fmt.Errorf("write error: %w", err)
-			}
-
-			// Read raw response
-			buf := make([]byte, 256)
-			n, err := cam.serial.Read(buf)
-			if err != nil && err != io.EOF {
-				return fmt.Errorf("read error: %w", err)
-			}
-
-			fmt.Printf("Received %d bytes: %X\n", n, buf[:n])
-			fmt.Printf("As string: %q\n", buf[:n])
-
-			// Try to parse it
-			resp := cam.parseResponse(buf[:n])
-			fmt.Printf("Parsed: Type=%v, Error=%v, ErrorCode=%s\n",
-				resp.Type, resp.Error, resp.ErrorCode)
-
-			return nil
+			return cam.SetShutterSpeed(val)
 		},
-		Description: "Send raw command and show response",
+		Description: "Set shutter speed: 0=2s 1=1/15 2=1/60 3=1/100 4=1/1000 (manual/shutter-priority mode)",
+	},
+	"gain": {
+		Name: "gain", Usage: "gain <0-5>", MinArgs: 1, MaxArgs: 1,
+		Handler: func(cam *XU81Camera, args []string) error {
+			val, err := strconv.Atoi(args[0])
+			if err != nil {
+				return fmt.Errorf("invalid gain value: %w", err)
+			}
+			return cam.SetGain(val)
+		},
+		Description: "Set gain: 0=0dB 1=6dB 2=12dB 3=18dB 4=24dB 5=max (manual mode)",
+	},
+	"iris": {
+		Name: "iris", Usage: "iris <0-255>", MinArgs: 1, MaxArgs: 1,
+		Handler: func(cam *XU81Camera, args []string) error {
+			val, err := strconv.Atoi(args[0])
+			if err != nil {
+				return fmt.Errorf("invalid iris value: %w", err)
+			}
+			return cam.SetIris(val)
+		},
+		Description: "Set iris position 0-255, higher=brighter (manual/iris-priority mode)",
+	},
+	"digitalzoom": {
+		Name: "digitalzoom", Usage: "digitalzoom <0-110>", MinArgs: 1, MaxArgs: 1,
+		Handler: func(cam *XU81Camera, args []string) error {
+			val, err := strconv.Atoi(args[0])
+			if err != nil {
+				return fmt.Errorf("invalid digital zoom value: %w", err)
+			}
+			return cam.SetDigitalZoom(val)
+		},
+		Description: "Set digital zoom, (magnification-1.0)*10: 0=1.0x 110=12.0x (XU-81 independent mode)",
+	},
+	"autoir": {
+		Name: "autoir", Usage: "autoir <off|slow|gain>", MinArgs: 1, MaxArgs: 1,
+		Handler: func(cam *XU81Camera, args []string) error {
+			switch args[0] {
+			case "off":
+				return cam.SetAutoIR(0)
+			case "slow":
+				return cam.SetAutoIR(1)
+			case "gain":
+				return cam.SetAutoIR(2)
+			default:
+				return fmt.Errorf("invalid argument: use 'off', 'slow', or 'gain'")
+			}
+		},
+		Description: "Auto IR filter: off, slow (slow shutter), gain (night mode only)",
 	},
 
 	// Focus commands
@@ -1852,9 +1963,23 @@ var cliCommands = map[string]CLICommand{
 		Handler:     func(cam *XU81Camera, args []string) error { return cam.SetShootingMode(ShootingNight) },
 		Description: "Set shooting mode to night",
 	},
+	"showshutter": {
+		Name: "showshutter", Usage: "showshutter", MinArgs: 0, MaxArgs: 0,
+		Handler:     func(cam *XU81Camera, args []string) error { return cam.SetShootingMode(ShootingShutterPriority) },
+		Description: "Set shooting mode to shutter priority",
+	},
+	"showiris": {
+		Name: "showiris", Usage: "showiris", MinArgs: 0, MaxArgs: 0,
+		Handler:     func(cam *XU81Camera, args []string) error { return cam.SetShootingMode(ShootingIrisPriority) },
+		Description: "Set shooting mode to iris priority",
+	},
 }
 
 func main() {
+	os.Exit(run())
+}
+
+func run() int {
 	// ---- 1. global flags ----
 	cfgFile := flag.String("config", "", "Path to JSON config")
 	verbose := flag.Bool("v", false, "Verbose logging")
@@ -1864,7 +1989,7 @@ func main() {
 	cfg, err := LoadConfig(*cfgFile)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "config error: %v\n", err)
-		os.Exit(1)
+		return 1
 	}
 	logger := log.New(os.Stdout, "[XU81] ", log.LstdFlags)
 	if *verbose {
@@ -1875,10 +2000,29 @@ func main() {
 	cam := NewXU81Camera(cfg, logger)
 	defer cam.Close()
 
+	// Safety: a killed process must not leave the head panning — the
+	// pan/tilt mechanism is rated for 300K cycles.
+	ctx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stopSignals()
+	go func() {
+		<-ctx.Done()
+		cause := context.Cause(ctx)
+		if errors.Is(cause, context.Canceled) {
+			return // normal exit via stopSignals, not a signal
+		}
+		logger.Printf("shutting down (%v): stopping camera", cause)
+		cam.BestEffortStop()
+		cam.Close()
+		os.Exit(130)
+	}()
+
 	// ---- 4. CLI args or interactive ----
 	if flag.NArg() > 0 {
-		runCommand(cam, flag.Arg(0), flag.Args()[1:])
-		return
+		if err := runCommand(cam, flag.Arg(0), flag.Args()[1:]); err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			return 1
+		}
+		return 0
 	}
 
 	// ---------- INTERACTIVE SHELL ----------
@@ -1895,7 +2039,10 @@ func main() {
 		return
 	})
 
-	const historyFile = ".mycamera_history"
+	historyFile := ".mycamera_history"
+	if home, err := os.UserHomeDir(); err == nil {
+		historyFile = home + string(os.PathSeparator) + historyFile
+	}
 	if f, err := os.Open(historyFile); err == nil {
 		shell.ReadHistory(f)
 		f.Close()
@@ -1915,8 +2062,13 @@ func main() {
 		shell.AppendHistory(input)
 
 		if input == "help" {
-			for _, c := range cliCommands {
-				fmt.Printf("  %-10s %s\n", c.Name, c.Description)
+			names := make([]string, 0, len(cliCommands))
+			for name := range cliCommands {
+				names = append(names, name)
+			}
+			sort.Strings(names)
+			for _, name := range names {
+				fmt.Printf("  %-12s %s\n", name, cliCommands[name].Description)
 			}
 			continue
 		}
@@ -1925,26 +2077,27 @@ func main() {
 		}
 
 		tokens := strings.Fields(input)
-		runCommand(cam, tokens[0], tokens[1:])
+		if err := runCommand(cam, tokens[0], tokens[1:]); err != nil {
+			fmt.Printf("error: %v\n", err)
+		}
 	}
+
+	cam.BestEffortStop()
 
 	if f, err := os.Create(historyFile); err == nil {
 		shell.WriteHistory(f)
 		f.Close()
 	}
+	return 0
 }
 
-func runCommand(cam *XU81Camera, name string, args []string) {
+func runCommand(cam *XU81Camera, name string, args []string) error {
 	cmd, ok := cliCommands[name]
 	if !ok {
-		fmt.Printf("unknown command %q\n", name)
-		return
+		return fmt.Errorf("unknown command %q", name)
 	}
 	if len(args) < cmd.MinArgs || len(args) > cmd.MaxArgs {
-		fmt.Printf("usage: %s\n", cmd.Usage)
-		return
+		return fmt.Errorf("usage: %s", cmd.Usage)
 	}
-	if err := cmd.Handler(cam, args); err != nil {
-		fmt.Printf("error: %v\n", err)
-	}
+	return cmd.Handler(cam, args)
 }

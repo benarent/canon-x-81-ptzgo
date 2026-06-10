@@ -44,15 +44,12 @@ json
   "baud_rate": 9600,
   "read_timeout": 300000000,
   "power_on_delay": 15000000000,
-  "default_pan_speed": 2000,
-  "default_tilt_speed": 2000,
-  "camera_model": 1,
-  "digital_zoom_mode": 0
+  "camera_model": 1
 }
 ```
 
 -   `camera_model`: 0 for XU-80, 1 for XU-81
--   `digital_zoom_mode`: 0 for Optical Interlocking, 1 for Independent (XU-81 only)
+-   `read_timeout` / `power_on_delay` are in nanoseconds
 
 Usage
 -----
@@ -183,6 +180,18 @@ Command Reference
 | `showauto` | Auto mode |
 | `showmanual` | Manual mode |
 | `shownight` | Night mode |
+| `showshutter` | Shutter priority mode |
+| `showiris` | Iris priority mode |
+
+### Exposure Control
+
+| Command | Description |
+| --- | --- |
+| `shutter <0-4>` | Shutter speed: 0=2s, 1=1/15, 2=1/60, 3=1/100, 4=1/1000 (manual/shutter-priority) |
+| `gain <0-5>` | Gain: 0=0dB through 5=max (manual mode) |
+| `iris <0-255>` | Iris position, higher=brighter (manual/iris-priority) |
+| `digitalzoom <0-110>` | Digital zoom, (magnification−1.0)×10: 0=1.0x, 110=12.0x (XU-81, independent mode) |
+| `autoir <off\|slow\|gain>` | Auto IR filter control (night mode only) |
 
 ### Filters & Effects
 
@@ -345,6 +354,20 @@ sudo usermod -a -G dialout $USER
 -   Linux: `/dev/ttyUSB0` or `/dev/ttyS0`
 -   macOS: `/dev/tty.usbserial-*`
 -   Windows: `COM3`, `COM4`, etc.
+
+Safety
+------
+
+To protect the pan/tilt mechanism (rated for 300,000 cycles), the program sends a
+`stop` command on exit:
+
+-   Always on SIGINT/SIGTERM (e.g. Ctrl-C while a command is running)
+-   When leaving the interactive shell (`quit`, `exit`, Ctrl-C, Ctrl-D)
+-   *Not* after one-shot commands (`./ptz-control left` keeps panning so that
+    scripted sequences like `left; sleep 2; stop` still work)
+
+In command-line mode the process exits non-zero when a command fails, so it is
+safe to use in scripts with `set -e`.
 
 Limitations
 -----------
