@@ -1,3 +1,7 @@
 ptz-control
 .mycamera_history
 config.json
+
+# go build output named after the module
+canon-x-81-ptzgo
+mycamera

@@ -1,4 +1,4 @@
-module mycamera
+module github.com/benarent/canon-x-81-ptzgo
 
 go 1.26
 

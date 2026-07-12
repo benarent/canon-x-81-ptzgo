@@ -26,8 +26,8 @@ Installation
 bash
 
 ```
-git clone https://github.com/yourusername/canon-ptz-controller
-cd canon-ptz-controller
+git clone https://github.com/benarent/canon-x-81-ptzgo
+cd canon-x-81-ptzgo
 go build -o ptz-control
 ```
 
@@ -42,14 +42,15 @@ json
 {
   "port": "/dev/ttyUSB0",
   "baud_rate": 9600,
-  "read_timeout": 300000000,
-  "power_on_delay": 15000000000,
+  "read_timeout": "300ms",
+  "power_on_delay": "15s",
   "camera_model": 1
 }
 ```
 
 -   `camera_model`: 0 for XU-80, 1 for XU-81
--   `read_timeout` / `power_on_delay` are in nanoseconds
+-   `read_timeout` / `power_on_delay` take Go duration strings (`"300ms"`, `"15s"`);
+    raw nanosecond numbers also work for backward compatibility
 
 Usage
 -----
@@ -96,7 +97,7 @@ Command Reference
 
 | Command | Description |
 | --- | --- |
-| `on` | Power on camera (15s boot time) |
+| `on` | Power on camera (returns once booted, up to 15s) |
 | `off` | Power off camera |
 
 ### Movement Control
@@ -169,7 +170,7 @@ speed. Directions: +pan = right, +tilt = up, +zoom = telephoto, +focus = near.
 | Command | Description |
 | --- | --- |
 | `record <slot>` | Save position to slot (0-127) |
-| `recall <slot> [time]` | Move to preset (time 0 = instant, or 2-48s) |
+| `recall <slot> [time]` | Move to preset (default 5s smooth move; time 0 = instant, or 2-48s) |
 
 **Note:** Recall movement is asynchronous — the command returns as soon as the
 camera accepts it. Use `wait` to block until the move completes. Sending
@@ -293,7 +294,8 @@ bash
 > goto -4500 -2000
 
 # Return to saved position
-> recall 1       # Fast return
+> recall 1 0     # Instant return
+> recall 1       # Smooth 5-second transition (default)
 > recall 1 10    # Smooth 10-second transition
 ```
 
@@ -424,7 +426,7 @@ Based on Canon XU-80/XU-81 Programmer's Manual Ver. 02.02
 
 RJ-45
 
-- 2 - Organge Ground - 2
+- 2 - Orange - Ground - 2
 - 3 - green-white stripe = RXD+
 - 4 - Blue - TXD- 
 - 5 - Blue/White - TXD+
