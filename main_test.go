@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -403,6 +405,24 @@ func TestGetStatus(t *testing.T) {
 	}
 }
 
+func TestGetExtendedStatus(t *testing.T) {
+	// 0x12200: Panning (b9), CameraManualMode (b13), PanMotorError (b16);
+	// power-off flag (b5) clear
+	mock := &mockSerialPort{readBuf: statusResponse("12200")}
+	cam := newTestCamera(mock)
+
+	status, err := cam.GetExtendedStatus()
+	if err != nil {
+		t.Fatalf("GetExtendedStatus: %v", err)
+	}
+	if !status.PowerOn || !status.Panning || !status.CameraManualMode || !status.PanMotorError {
+		t.Errorf("got %+v, want PowerOn, Panning, CameraManualMode, PanMotorError set", status)
+	}
+	if status.TiltMotorError || status.Zooming || status.CameraBusy {
+		t.Errorf("got %+v, want TiltMotorError, Zooming, CameraBusy clear", status)
+	}
+}
+
 func TestGetSerialNumber(t *testing.T) {
 	mock := &mockSerialPort{readBuf: statusResponse("XU-80W2500000--")}
 	cam := newTestCamera(mock)
@@ -500,6 +520,98 @@ func TestDriveFraming(t *testing.T) {
 	if err := cam.Drive(0, 0, -65, 0); err == nil {
 		t.Error("speed -65 should be rejected")
 	}
+}
+
+func TestDriveNegativeFraming(t *testing.T) {
+	// Pan/tilt count down from 63, zoom/focus count up from 64, so negative
+	// speeds must invert differently per axis pair.
+	tests := []struct {
+		name                   string
+		pan, tilt, zoom, focus int
+		params                 string // wire order: zoom, focus, tilt, pan
+	}{
+		{"all max negative", -64, -64, -64, -64, "00007F7F"},
+		{"mixed signs", 10, -10, 5, -5, "453B4935"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mock := &mockSerialPort{readBuf: []byte{ackByte}}
+			cam := newTestCamera(mock)
+			if err := cam.Drive(tt.pan, tt.tilt, tt.zoom, tt.focus); err != nil {
+				t.Fatalf("Drive: %v", err)
+			}
+			want := append([]byte{0xFF, 0x30, 0x30, 0x01, 0x81}, []byte(tt.params)...)
+			want = append(want, 0xEF)
+			if len(mock.writes) != 1 || !bytes.Equal(mock.writes[0], want) {
+				t.Errorf("wrote %X, want %X", mock.writes, want)
+			}
+		})
+	}
+}
+
+func TestRunCommandArgCount(t *testing.T) {
+	mock := &mockSerialPort{}
+	cam := newTestCamera(mock)
+
+	if err := runCommand(cam, "bogus", nil); err == nil || !strings.Contains(err.Error(), "unknown command") {
+		t.Errorf("unknown command should be rejected, got %v", err)
+	}
+	if err := runCommand(cam, "goto", []string{"1"}); err == nil || !strings.Contains(err.Error(), "usage:") {
+		t.Errorf("too few args should show usage, got %v", err)
+	}
+	if err := runCommand(cam, "zoom", []string{"1", "2"}); err == nil || !strings.Contains(err.Error(), "usage:") {
+		t.Errorf("too many args should show usage, got %v", err)
+	}
+	if len(mock.writes) != 0 {
+		t.Errorf("nothing should be written on arg-count failure, got %X", mock.writes)
+	}
+}
+
+func TestLoadConfigDurations(t *testing.T) {
+	writeConfig := func(t *testing.T, content string) string {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "config.json")
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+
+	t.Run("duration strings and raw nanoseconds", func(t *testing.T) {
+		cfg, err := LoadConfig(writeConfig(t,
+			`{"port":"/dev/x","read_timeout":"250ms","power_on_delay":20000000000}`))
+		if err != nil {
+			t.Fatalf("LoadConfig: %v", err)
+		}
+		if got := time.Duration(cfg.ReadTimeout); got != 250*time.Millisecond {
+			t.Errorf("ReadTimeout = %s, want 250ms", got)
+		}
+		if got := time.Duration(cfg.PowerOnDelay); got != 20*time.Second {
+			t.Errorf("PowerOnDelay = %s, want 20s", got)
+		}
+	})
+
+	t.Run("invalid duration string", func(t *testing.T) {
+		if _, err := LoadConfig(writeConfig(t, `{"read_timeout":"soon"}`)); err == nil {
+			t.Error("expected error for invalid duration string")
+		}
+	})
+
+	t.Run("zero read timeout falls back to default", func(t *testing.T) {
+		cfg, err := LoadConfig(writeConfig(t, `{"read_timeout":"0s"}`))
+		if err != nil {
+			t.Fatalf("LoadConfig: %v", err)
+		}
+		if got := time.Duration(cfg.ReadTimeout); got != defaultReadTimeout {
+			t.Errorf("ReadTimeout = %s, want default %s", got, defaultReadTimeout)
+		}
+	})
+
+	t.Run("missing file", func(t *testing.T) {
+		if _, err := LoadConfig("/nonexistent/config.json"); err == nil || !strings.Contains(err.Error(), "reading config") {
+			t.Errorf("expected wrapped read error, got %v", err)
+		}
+	})
 }
 
 func TestWaitIdle(t *testing.T) {
