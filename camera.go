@@ -548,9 +548,32 @@ func (cam *XU81Camera) PowerOn() error {
 	}
 	if resp.Type == ResponseACK {
 		cam.logger.Println("Camera powering on, waiting for boot...")
-		time.Sleep(cam.config.PowerOnDelay)
+		return cam.waitPowerOn(cam.config.PowerOnDelay)
 	}
 	return nil
+}
+
+const powerOnPollInterval = time.Second
+
+// waitPowerOn polls the camera until it reports power on, returning as soon
+// as it is ready instead of sleeping a fixed boot delay. Errors are expected
+// while booting (the camera stays silent or answers Busy), so they only
+// count once the deadline has passed.
+func (cam *XU81Camera) waitPowerOn(timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for {
+		status, err := cam.GetStatus()
+		if err == nil && status.PowerOn {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			if err != nil {
+				return fmt.Errorf("camera not ready after %s: %w", timeout, err)
+			}
+			return fmt.Errorf("camera not ready after %s", timeout)
+		}
+		time.Sleep(powerOnPollInterval)
+	}
 }
 
 func (cam *XU81Camera) PowerOff() error {
@@ -797,14 +820,16 @@ const waitIdlePollInterval = 250 * time.Millisecond
 // WaitIdle polls the extended status until the camera reports no motion or
 // busy state, or the timeout elapses. Useful after recall/goto, which return
 // as soon as the camera accepts the command (movement is asynchronous).
+// A Busy answer or a response timeout counts as "still moving", not a
+// failure — the camera may not service status requests mid-move.
 func (cam *XU81Camera) WaitIdle(timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	for {
 		status, err := cam.GetExtendedStatus()
-		if err != nil {
+		if err != nil && !IsBusy(err) && !errors.Is(err, errResponseTimeout) {
 			return err
 		}
-		if !status.CameraBusy && !status.Panning && !status.Tilting &&
+		if err == nil && !status.CameraBusy && !status.Panning && !status.Tilting &&
 			!status.Zooming && !status.Focusing {
 			return nil
 		}
@@ -903,24 +928,26 @@ func (cam *XU81Camera) MoveShotMemory(slot int, duration int) error {
 }
 
 // Additional camera control methods
+
+// initializeTimeout bounds the wait for a pan-tilt head initialize sweep.
+const initializeTimeout = 30 * time.Second
+
 func (cam *XU81Camera) InitializeHome() error {
 	c := commands["initialize_home"]
-	_, err := cam.sendCommand(c, []byte{paramOff})
-	if err == nil {
-		cam.logger.Println("Camera initializing to home position...")
-		time.Sleep(10 * time.Second) // Wait for initialization
+	if _, err := cam.sendCommand(c, []byte{paramOff}); err != nil {
+		return err
 	}
-	return err
+	cam.logger.Println("Camera initializing to home position...")
+	return cam.WaitIdle(initializeTimeout)
 }
 
 func (cam *XU81Camera) InitializeOriginal() error {
 	c := commands["initialize_original"]
-	_, err := cam.sendCommand(c, []byte{paramOn})
-	if err == nil {
-		cam.logger.Println("Camera initializing to original position...")
-		time.Sleep(10 * time.Second) // Wait for initialization
+	if _, err := cam.sendCommand(c, []byte{paramOn}); err != nil {
+		return err
 	}
-	return err
+	cam.logger.Println("Camera initializing to original position...")
+	return cam.WaitIdle(initializeTimeout)
 }
 
 func (cam *XU81Camera) SetPanSpeed(speed int) error {
