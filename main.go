@@ -2162,6 +2162,30 @@ var cliCommands = map[string]CLICommand{
 	},
 }
 
+// Cleanup functions for signal-path exits: os.Exit skips defers, so anything
+// that must run on SIGINT/SIGTERM (restoring the terminal from liner's raw
+// mode, saving history) registers here. Run in LIFO order.
+var (
+	cleanupMu    sync.Mutex
+	cleanupFuncs []func()
+)
+
+func registerCleanup(f func()) {
+	cleanupMu.Lock()
+	defer cleanupMu.Unlock()
+	cleanupFuncs = append(cleanupFuncs, f)
+}
+
+func runCleanups() {
+	cleanupMu.Lock()
+	fns := cleanupFuncs
+	cleanupFuncs = nil
+	cleanupMu.Unlock()
+	for i := len(fns) - 1; i >= 0; i-- {
+		fns[i]()
+	}
+}
+
 func main() {
 	os.Exit(run())
 }
@@ -2202,6 +2226,7 @@ func run() int {
 		logger.Printf("shutting down (%v): stopping camera", cause)
 		cam.BestEffortStop()
 		cam.Close()
+		runCleanups()
 		os.Exit(130)
 	}()
 
@@ -2236,6 +2261,17 @@ func run() int {
 		shell.ReadHistory(f)
 		f.Close()
 	}
+
+	saveHistory := func() {
+		if f, err := os.Create(historyFile); err == nil {
+			shell.WriteHistory(f)
+			f.Close()
+		}
+	}
+	registerCleanup(func() {
+		saveHistory()
+		shell.Close()
+	})
 
 	fmt.Println("Interactive mode — type \"help\" for commands, Ctrl-D to quit.")
 	for {
@@ -2272,11 +2308,7 @@ func run() int {
 	}
 
 	cam.BestEffortStop()
-
-	if f, err := os.Create(historyFile); err == nil {
-		shell.WriteHistory(f)
-		f.Close()
-	}
+	saveHistory()
 	return 0
 }
 
