@@ -340,7 +340,8 @@ func TestSendCommandFraming(t *testing.T) {
 	if err := cam.Stop(); err != nil {
 		t.Fatalf("Stop: %v", err)
 	}
-	want := []byte{0xFF, 0x30, 0x30, 0x01, 0x53, 0x30, 0xEF}
+	// Stop drives all axes to zero: zoom "40", focus "40", tilt "3F", pan "3F"
+	want := []byte{0xFF, 0x30, 0x30, 0x01, 0x81, '4', '0', '4', '0', '3', 'F', '3', 'F', 0xEF}
 	if len(mock.writes) != 1 || !bytes.Equal(mock.writes[0], want) {
 		t.Errorf("wrote %X, want %X", mock.writes, want)
 	}

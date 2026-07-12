@@ -963,10 +963,11 @@ func (cam *XU81Camera) PowerOff() error {
 }
 
 // Movement control methods
+
+// Stop halts motion on all four axes (pan, tilt, zoom, focus) with a single
+// speed-control frame. The discrete pan_stop (0153) only halts pan/tilt.
 func (cam *XU81Camera) Stop() error {
-	c := commands["pan_stop"]
-	_, err := cam.sendCommand(c, []byte{paramOff})
-	return err
+	return cam.Drive(0, 0, 0, 0)
 }
 
 // BestEffortStop halts pan/tilt movement if a connection was ever
