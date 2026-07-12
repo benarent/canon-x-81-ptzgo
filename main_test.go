@@ -515,6 +515,18 @@ func TestReadResponseSkipsGarbage(t *testing.T) {
 	}
 }
 
+func TestReadResponseGarbageOnly(t *testing.T) {
+	// Noise with no valid start byte must time out, not panic, once the
+	// garbage-discard loop has stripped the buffer empty.
+	mock := &mockSerialPort{readBuf: []byte{0x00, 0x99}}
+	cam := newTestCamera(mock)
+
+	_, err := cam.readResponse()
+	if err == nil || !strings.Contains(err.Error(), "timeout") {
+		t.Errorf("expected timeout error, got %v", err)
+	}
+}
+
 func TestReadResponseTimeout(t *testing.T) {
 	cam := newTestCamera(&mockSerialPort{})
 

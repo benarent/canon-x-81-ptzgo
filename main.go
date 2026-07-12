@@ -806,9 +806,12 @@ func (cam *XU81Camera) readResponse() (Response, error) {
 		for len(buf) > 0 && buf[0] != ackByte && buf[0] != nakByte && buf[0] != responseHeader {
 			buf = buf[1:]
 		}
+		if len(buf) == 0 {
+			continue
+		}
 
 		// Check for complete response
-		if len(buf) > 0 && (buf[0] == ackByte || buf[0] == nakByte) {
+		if buf[0] == ackByte || buf[0] == nakByte {
 			return cam.parseResponse(buf[:1]), nil
 		}
 		if buf[0] == responseHeader {
