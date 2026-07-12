@@ -36,13 +36,35 @@ const (
 	powerOnBootDelay   = 15 * time.Second
 	paramOn            = 0x31 // ASCII '1'
 	paramOff           = 0x30 // ASCII '0'
-	minSpeed           = 5
-	maxSpeed           = 3000
-	maxZoom            = 0xEE
-	minPanAngle        = -9000
-	maxPanAngle        = 9000
-	minTiltAngle       = -6500
-	maxTiltAngle       = 6500
+
+	// Pan/tilt drive directions (0153; '0' stops)
+	paramPanRight = 0x31 // '1'
+	paramPanLeft  = 0x32 // '2'
+	paramTiltUp   = 0x33 // '3'
+	paramTiltDown = 0x34 // '4'
+
+	// Focus operations (01A1)
+	paramFocusAuto     = 0x30 // '0'
+	paramFocusManual   = 0x31 // '1'
+	paramFocusNear     = 0x32 // '2'
+	paramFocusFar      = 0x33 // '3'
+	paramFocusOneShot  = 0x41 // 'A'
+	paramFocusInfinity = 0x42 // 'B'
+
+	// Zoom operations (01A2)
+	paramZoomStop = 0x30 // '0'
+	paramZoomWide = 0x31 // '1'
+	paramZoomTele = 0x32 // '2'
+
+	// Washer output (0171): 'B' selects the washer, followed by on/off
+	paramWasherSelect = 0x42 // 'B'
+	minSpeed          = 5
+	maxSpeed          = 3000
+	maxZoom           = 0xEE
+	minPanAngle       = -9000
+	maxPanAngle       = 9000
+	minTiltAngle      = -6500
+	maxTiltAngle      = 6500
 )
 
 // Camera model types
@@ -907,25 +929,25 @@ func (cam *XU81Camera) BestEffortStop() {
 
 func (cam *XU81Camera) PanRight() error {
 	c := commands["pan_right"]
-	_, err := cam.sendCommand(c, []byte{paramOn})
+	_, err := cam.sendCommand(c, []byte{paramPanRight})
 	return err
 }
 
 func (cam *XU81Camera) PanLeft() error {
 	c := commands["pan_left"]
-	_, err := cam.sendCommand(c, []byte{0x32}) // ASCII '2'
+	_, err := cam.sendCommand(c, []byte{paramPanLeft})
 	return err
 }
 
 func (cam *XU81Camera) TiltUp() error {
 	c := commands["tilt_up"]
-	_, err := cam.sendCommand(c, []byte{0x33}) // ASCII '3'
+	_, err := cam.sendCommand(c, []byte{paramTiltUp})
 	return err
 }
 
 func (cam *XU81Camera) TiltDown() error {
 	c := commands["tilt_down"]
-	_, err := cam.sendCommand(c, []byte{0x34}) // ASCII '4'
+	_, err := cam.sendCommand(c, []byte{paramTiltDown})
 	return err
 }
 
@@ -1440,56 +1462,56 @@ func (cam *XU81Camera) ColorBarOff() error {
 // Focus controls
 func (cam *XU81Camera) FocusAuto() error {
 	c := commands["focus_auto"]
-	_, err := cam.sendCommand(c, []byte{paramOff})
+	_, err := cam.sendCommand(c, []byte{paramFocusAuto})
 	return err
 }
 
 func (cam *XU81Camera) FocusManual() error {
 	c := commands["focus_manual"]
-	_, err := cam.sendCommand(c, []byte{paramOn})
+	_, err := cam.sendCommand(c, []byte{paramFocusManual})
 	return err
 }
 
 func (cam *XU81Camera) FocusInfinity() error {
 	c := commands["focus_infinity"]
-	_, err := cam.sendCommand(c, []byte{0x42}) // ASCII 'B'
+	_, err := cam.sendCommand(c, []byte{paramFocusInfinity})
 	return err
 }
 
 func (cam *XU81Camera) FocusNear() error {
 	c := commands["focus_near"]
-	_, err := cam.sendCommand(c, []byte{0x32}) // ASCII '2'
+	_, err := cam.sendCommand(c, []byte{paramFocusNear})
 	return err
 }
 
 func (cam *XU81Camera) FocusFar() error {
 	c := commands["focus_far"]
-	_, err := cam.sendCommand(c, []byte{0x33}) // ASCII '3'
+	_, err := cam.sendCommand(c, []byte{paramFocusFar})
 	return err
 }
 
 func (cam *XU81Camera) FocusOneShot() error {
 	c := commands["focus_oneshot"]
-	_, err := cam.sendCommand(c, []byte{0x41}) // ASCII 'A'
+	_, err := cam.sendCommand(c, []byte{paramFocusOneShot})
 	return err
 }
 
 // Zoom controls
 func (cam *XU81Camera) ZoomStop() error {
 	c := commands["zoom_stop"]
-	_, err := cam.sendCommand(c, []byte{paramOff})
+	_, err := cam.sendCommand(c, []byte{paramZoomStop})
 	return err
 }
 
 func (cam *XU81Camera) ZoomWide() error {
 	c := commands["zoom_wide"]
-	_, err := cam.sendCommand(c, []byte{paramOn})
+	_, err := cam.sendCommand(c, []byte{paramZoomWide})
 	return err
 }
 
 func (cam *XU81Camera) ZoomTele() error {
 	c := commands["zoom_tele"]
-	_, err := cam.sendCommand(c, []byte{0x32}) // ASCII '2'
+	_, err := cam.sendCommand(c, []byte{paramZoomTele})
 	return err
 }
 
@@ -1502,14 +1524,14 @@ func (cam *XU81Camera) WasherControl() error {
 
 func (cam *XU81Camera) WasherOutputOn() error {
 	c := commands["washer_out"]
-	params := []byte{0x42, 0x31} // ASCII "B1"
+	params := []byte{paramWasherSelect, paramOn}
 	_, err := cam.sendCommand(c, params)
 	return err
 }
 
 func (cam *XU81Camera) WasherOutputOff() error {
 	c := commands["washer_out"]
-	params := []byte{0x42, 0x30} // ASCII "B0"
+	params := []byte{paramWasherSelect, paramOff}
 	_, err := cam.sendCommand(c, params)
 	return err
 }
