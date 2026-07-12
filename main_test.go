@@ -296,9 +296,6 @@ func TestValidators(t *testing.T) {
 		if err := validateSpeedParam([]byte("BB9"), ModelXU81); err == nil {
 			t.Error("speed 3001 should be rejected")
 		}
-		if err := validateSpeedParam([]byte("05"), ModelXU81); err == nil {
-			t.Error("wrong length should be rejected")
-		}
 	})
 
 	t.Run("digital zoom model gating", func(t *testing.T) {
@@ -344,6 +341,22 @@ func TestSendCommandFraming(t *testing.T) {
 	want := []byte{0xFF, 0x30, 0x30, 0x01, 0x81, '4', '0', '4', '0', '3', 'F', '3', 'F', 0xEF}
 	if len(mock.writes) != 1 || !bytes.Equal(mock.writes[0], want) {
 		t.Errorf("wrote %X, want %X", mock.writes, want)
+	}
+}
+
+func TestSendCommandParamLength(t *testing.T) {
+	// Length comes from the command table, enforced before any validator.
+	mock := &mockSerialPort{}
+	cam := newTestCamera(mock)
+
+	if _, err := cam.sendCommand(commands["pan_speed"], []byte("05")); err == nil {
+		t.Error("2 bytes for a 3-byte command should be rejected")
+	}
+	if _, err := cam.sendCommand(commands["status"], []byte{paramOff}); err == nil {
+		t.Error("params on a 0-param command should be rejected")
+	}
+	if len(mock.writes) != 0 {
+		t.Errorf("nothing should be written on length failure, got %X", mock.writes)
 	}
 }
 

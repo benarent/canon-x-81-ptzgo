@@ -316,118 +316,118 @@ var commands = map[string]Command{
 	},
 	"pan_speed_request": {
 		name: "Pan Speed Request", code: "0152", paramLength: 1,
-		description: "Get current pan speed", validator: validateSingleParam,
+		description: "Get current pan speed",
 	},
 	"tilt_speed_request": {
 		name: "Tilt Speed Request", code: "0152", paramLength: 1,
-		description: "Get current tilt speed", validator: validateSingleParam,
+		description: "Get current tilt speed",
 	},
 	"pan_stop": {
 		name: "Pan/Tilt Stop", code: "0153", paramLength: 1,
-		description: "Stop pan/tilt movement", validator: validateSingleParam,
+		description: "Stop pan/tilt movement",
 	},
 	"pan_right": {
 		name: "Pan Right Start", code: "0153", paramLength: 1,
-		description: "Start panning right", validator: validateSingleParam,
+		description: "Start panning right",
 	},
 	"pan_left": {
 		name: "Pan Left Start", code: "0153", paramLength: 1,
-		description: "Start panning left", validator: validateSingleParam,
+		description: "Start panning left",
 	},
 	"tilt_up": {
 		name: "Tilt Up Start", code: "0153", paramLength: 1,
-		description: "Start tilting up", validator: validateSingleParam,
+		description: "Start tilting up",
 	},
 	"tilt_down": {
 		name: "Tilt Down Start", code: "0153", paramLength: 1,
-		description: "Start tilting down", validator: validateSingleParam,
+		description: "Start tilting down",
 	},
 	"initialize_home": {
 		name: "Pan-Tilt Head Initialize 1", code: "0158", paramLength: 1,
-		description: "Initialize and move to home position", validator: validateSingleParam,
+		description: "Initialize and move to home position",
 	},
 	"initialize_original": {
 		name: "Pan-Tilt Head Initialize 2", code: "0158", paramLength: 1,
-		description: "Initialize and move to original position", validator: validateSingleParam,
+		description: "Initialize and move to original position",
 	},
 	"pan_tilt_pos": {
 		name: "Pan/Tilt Position Assignment", code: "0162", paramLength: 8,
-		description: "Set absolute pan/tilt position", validator: validatePositionParam,
+		description: "Set absolute pan/tilt position",
 	},
 	"pan_tilt_request": {
 		name: "Pan/Tilt Angle Request", code: "0163", paramLength: 0,
-		description: "Get current pan/tilt position", validator: nil,
+		description: "Get current pan/tilt position",
 	},
 
 	"wiper_control": {
 		name: "Wiper Control", code: "017A", paramLength: 1,
-		description: "Operate wiper (one cycle)", validator: validateSingleParam,
+		description: "Operate wiper (one cycle)",
 	},
 	"washer_control": {
 		name: "Washer Control", code: "017A", paramLength: 1,
-		description: "Auto-washer (4 wiper cycles, washer on first 2)", validator: validateSingleParam,
+		description: "Auto-washer (4 wiper cycles, washer on first 2)",
 	},
 	"washer_out": {
 		name: "Washer Output On/Off", code: "0171", paramLength: 2,
-		description: "Manually turn washer on or off", validator: validateWasherParam,
+		description: "Manually turn washer on or off",
 	},
 
 	// Camera Control Commands
 	"camera_version": {
 		name: "Camera Version Request", code: "01BE", paramLength: 1,
-		description: "Get camera version", validator: validateSingleParam,
+		description: "Get camera version",
 	},
 	"power_on": {
 		name: "Camera Power ON", code: "01A0", paramLength: 1,
-		description: "Turn on the camera power", validator: validateSingleParam,
+		description: "Turn on the camera power",
 	},
 	"power_off": {
 		name: "Camera Power OFF", code: "01A0", paramLength: 1,
-		description: "Turn off the camera power", validator: validateSingleParam,
+		description: "Turn off the camera power",
 	},
 	"focus_auto": {
 		name: "Focus Auto", code: "01A1", paramLength: 1,
-		description: "Enable auto focus", validator: validateSingleParam,
+		description: "Enable auto focus",
 	},
 	"focus_manual": {
 		name: "Focus Manual", code: "01A1", paramLength: 1,
-		description: "Set manual focus mode", validator: validateSingleParam,
+		description: "Set manual focus mode",
 	},
 	"focus_infinity": {
 		name: "Focus Fixed at Infinity", code: "01A1", paramLength: 1,
-		description: "Fix focus at infinity", validator: validateSingleParam,
+		description: "Fix focus at infinity",
 	},
 	"focus_near": {
 		name: "Focus Near", code: "01A1", paramLength: 1,
-		description: "Move focus near", validator: validateSingleParam,
+		description: "Move focus near",
 	},
 	"focus_far": {
 		name: "Focus Far", code: "01A1", paramLength: 1,
-		description: "Move focus far", validator: validateSingleParam,
+		description: "Move focus far",
 	},
 	"focus_oneshot": {
 		name: "One-shot AF", code: "01A1", paramLength: 1,
-		description: "Perform one-shot autofocus", validator: validateSingleParam,
+		description: "Perform one-shot autofocus",
 	},
 	"zoom_stop": {
 		name: "Zoom Stop", code: "01A2", paramLength: 1,
-		description: "Stop zoom operation", validator: validateSingleParam,
+		description: "Stop zoom operation",
 	},
 	"zoom_wide": {
 		name: "Zoom Wide", code: "01A2", paramLength: 1,
-		description: "Zoom to wide", validator: validateSingleParam,
+		description: "Zoom to wide",
 	},
 	"zoom_tele": {
 		name: "Zoom Tele", code: "01A2", paramLength: 1,
-		description: "Zoom to telephoto", validator: validateSingleParam,
+		description: "Zoom to telephoto",
 	},
 	"zoom_pos": {
 		name: "Zoom Position", code: "01A3", paramLength: 2,
-		description: "Set zoom position (00h-EEh)", validator: validateZoomParam,
+		description: "Set zoom position (00h-EEh)",
 	},
 	"zoom_pos_request": {
 		name: "Zoom Position Request", code: "01A4", paramLength: 0,
-		description: "Get current zoom position", validator: nil,
+		description: "Get current zoom position",
 	},
 	"digital_zoom": {
 		name: "Digital Zoom Magnification Assignment", code: "01DA", paramLength: 2,
@@ -439,31 +439,31 @@ var commands = map[string]Command{
 	},
 	"shutter_speed": {
 		name: "Shutter Speed Assignment", code: "01AD", paramLength: 1,
-		description: "Set shutter speed", validator: validateShutterParam,
+		description: "Set shutter speed",
 	},
 	"gain_assignment": {
 		name: "Gain Assignment", code: "01AE", paramLength: 1,
-		description: "Set camera gain", validator: validateGainParam,
+		description: "Set camera gain",
 	},
 	"iris_assignment": {
 		name: "Iris Assignment", code: "01A6", paramLength: 2,
-		description: "Set iris position", validator: validateIrisParam,
+		description: "Set iris position",
 	},
 	"white_balance": {
 		name: "White Balance Control", code: "01A7", paramLength: 1,
-		description: "Set white balance mode", validator: validateWhiteBalanceParam,
+		description: "Set white balance mode",
 	},
 	"wdr": {
 		name: "WDR ON/OFF", code: "01A5", paramLength: 1,
-		description: "Wide Dynamic Range on/off", validator: validateSingleParam,
+		description: "Wide Dynamic Range on/off",
 	},
 	"nd_filter": {
 		name: "ND Filter ON/OFF", code: "01B6", paramLength: 1,
-		description: "Neutral Density filter on/off", validator: validateSingleParam,
+		description: "Neutral Density filter on/off",
 	},
 	"ir_filter": {
 		name: "IR Filter ON/OFF", code: "01BB", paramLength: 1,
-		description: "Toggle IR filter", validator: validateSingleParam,
+		description: "Toggle IR filter",
 	},
 	"auto_ir": {
 		name: "Auto IR Control", code: "01BA", paramLength: 1,
@@ -471,25 +471,25 @@ var commands = map[string]Command{
 	},
 	"color_bar": {
 		name: "Color Bar Control", code: "01B8", paramLength: 1,
-		description: "Color bar on/off", validator: validateSingleParam,
+		description: "Color bar on/off",
 	},
 
 	// System Control Commands
 	"status": {
 		name: "Operation Status", code: "0186", paramLength: 0,
-		description: "Get camera operation status", validator: nil,
+		description: "Get camera operation status",
 	},
 	"extended_status": {
 		name: "Extended Operation Status", code: "0186", paramLength: 1,
-		description: "Get extended operation status", validator: validateSingleParam,
+		description: "Get extended operation status",
 	},
 	"product_name": {
 		name: "Product Name Request", code: "0187", paramLength: 0,
-		description: "Get product name", validator: nil,
+		description: "Get product name",
 	},
 	"rom_version": {
 		name: "ROM Version Request", code: "0188", paramLength: 0,
-		description: "Get ROM version", validator: nil,
+		description: "Get ROM version",
 	},
 	"speed_control": {
 		name: "Zoom/Focus/Tilt/Pan Speed Control", code: "0181", paramLength: 8,
@@ -497,30 +497,21 @@ var commands = map[string]Command{
 	},
 	"shot_memory_record": {
 		name: "Shot Memory Recording", code: "0182", paramLength: 2,
-		description: "Record current position to shot memory", validator: validateShotMemoryParam,
+		description: "Record current position to shot memory",
 	},
 	"shot_memory_move": {
 		name: "Shot Memory Movement", code: "0183", paramLength: 4,
-		description: "Move to shot memory position", validator: validateShotMoveParam,
+		description: "Move to shot memory position",
 	},
 	"serial_number": {
 		name: "Serial Number Request", code: "01E9", paramLength: 1,
-		description: "Get serial number", validator: validateSingleParam,
+		description: "Get serial number",
 	},
 }
 
-// Validation functions
-func validateSingleParam(params []byte, model CameraModel) error {
-	if len(params) != 1 {
-		return errors.New("command requires exactly 1 parameter byte")
-	}
-	return nil
-}
-
+// Validation functions check parameter semantics; sendCommand already
+// enforces the length declared in the command table.
 func validateSpeedParam(params []byte, model CameraModel) error {
-	if len(params) != 3 {
-		return errors.New("speed command requires exactly 3 parameter bytes")
-	}
 	// Convert ASCII hex to integer for validation
 	speedStr := string(params)
 	speed, err := strconv.ParseInt(speedStr, 16, 32)
@@ -533,41 +524,14 @@ func validateSpeedParam(params []byte, model CameraModel) error {
 	return nil
 }
 
-func validatePositionParam(params []byte, model CameraModel) error {
-	if len(params) != 8 {
-		return errors.New("position command requires exactly 8 parameter bytes")
-	}
-	return nil
-}
-
-func validateZoomParam(params []byte, model CameraModel) error {
-	if len(params) != 2 {
-		return errors.New("zoom command requires exactly 2 parameter bytes")
-	}
-	return nil
-}
-
-func validateWasherParam(params []byte, model CameraModel) error {
-	if len(params) != 2 {
-		return errors.New("washer command requires exactly 2 parameter bytes")
-	}
-	return nil
-}
-
 func validateDigitalZoomParam(params []byte, model CameraModel) error {
 	if model != ModelXU81 {
 		return errors.New("digital zoom only available on XU-81")
-	}
-	if len(params) != 2 {
-		return errors.New("digital zoom command requires exactly 2 parameter bytes")
 	}
 	return nil
 }
 
 func validateShootingModeParam(params []byte, model CameraModel) error {
-	if len(params) != 1 {
-		return errors.New("shooting mode command requires exactly 1 parameter byte")
-	}
 	mode := params[0]
 	if mode < 0x30 || mode > 0x34 { // ASCII '0' to '4'
 		return errors.New("invalid shooting mode parameter")
@@ -575,38 +539,7 @@ func validateShootingModeParam(params []byte, model CameraModel) error {
 	return nil
 }
 
-func validateShutterParam(params []byte, model CameraModel) error {
-	if len(params) != 1 {
-		return errors.New("shutter command requires exactly 1 parameter byte")
-	}
-	return nil
-}
-
-func validateGainParam(params []byte, model CameraModel) error {
-	if len(params) != 1 {
-		return errors.New("gain command requires exactly 1 parameter byte")
-	}
-	return nil
-}
-
-func validateIrisParam(params []byte, model CameraModel) error {
-	if len(params) != 2 {
-		return errors.New("iris command requires exactly 2 parameter bytes")
-	}
-	return nil
-}
-
-func validateWhiteBalanceParam(params []byte, model CameraModel) error {
-	if len(params) != 1 {
-		return errors.New("white balance command requires exactly 1 parameter byte")
-	}
-	return nil
-}
-
 func validateAutoIRParam(params []byte, model CameraModel) error {
-	if len(params) != 1 {
-		return errors.New("auto IR command requires exactly 1 parameter byte")
-	}
 	if params[0] < 0x30 || params[0] > 0x32 { // ASCII '0'-'2'
 		return errors.New("auto IR parameter must be 0 (off), 1 (slow shutter), or 2 (gain)")
 	}
@@ -614,9 +547,6 @@ func validateAutoIRParam(params []byte, model CameraModel) error {
 }
 
 func validateDriveParam(params []byte, model CameraModel) error {
-	if len(params) != 8 {
-		return errors.New("speed control command requires exactly 8 parameter bytes")
-	}
 	for i := 0; i < 8; i += 2 {
 		v, err := strconv.ParseUint(string(params[i:i+2]), 16, 8)
 		if err != nil {
@@ -625,20 +555,6 @@ func validateDriveParam(params []byte, model CameraModel) error {
 		if v > 0x7F {
 			return errors.New("speed control axis values must be 00h-7Fh")
 		}
-	}
-	return nil
-}
-
-func validateShotMemoryParam(params []byte, model CameraModel) error {
-	if len(params) != 2 {
-		return errors.New("shot memory command requires exactly 2 parameter bytes")
-	}
-	return nil
-}
-
-func validateShotMoveParam(params []byte, model CameraModel) error {
-	if len(params) != 4 {
-		return errors.New("shot move command requires exactly 4 parameter bytes")
 	}
 	return nil
 }
@@ -900,6 +816,10 @@ func parseErrorCode(code string) error {
 // The whole write/read transaction holds cam.mu — the protocol is
 // half-duplex, so commands must never interleave on the wire.
 func (cam *XU81Camera) sendCommand(cmd Command, params []byte) (Response, error) {
+	if len(params) != cmd.paramLength {
+		return Response{}, fmt.Errorf("command %s requires %d parameter byte(s), got %d",
+			cmd.name, cmd.paramLength, len(params))
+	}
 	if cmd.validator != nil {
 		if err := cmd.validator(params, cam.config.CameraModel); err != nil {
 			return Response{}, fmt.Errorf("parameter validation failed: %w", err)
