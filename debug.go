@@ -1,12 +1,13 @@
 package main
 
 import (
+	"errors"
 	"fmt"
-	"io"
 	"time"
 )
 
-// DebugRawCommand sends a named command and dumps the raw request/response bytes.
+// DebugRawCommand sends a named command with raw parameters (bypassing
+// validation) and dumps the request/response bytes.
 func (cam *XU81Camera) DebugRawCommand(cmdName string, params []byte) error {
 	cmd, ok := commands[cmdName]
 	if !ok {
@@ -19,6 +20,8 @@ func (cam *XU81Camera) DebugRawCommand(cmdName string, params []byte) error {
 		return err
 	}
 
+	_ = cam.serial.ResetInputBuffer()
+
 	cmdBytes := formatCommandBytes(cmd, params)
 	fmt.Printf("Sending %s: %X\n", cmd.name, cmdBytes)
 
@@ -27,58 +30,27 @@ func (cam *XU81Camera) DebugRawCommand(cmdName string, params []byte) error {
 		return fmt.Errorf("write error: %w", err)
 	}
 
-	// Read response with a longer timeout, restoring the configured one after
-	cam.serial.SetReadTimeout(500 * time.Millisecond)
-	defer cam.serial.SetReadTimeout(cam.config.ReadTimeout)
-
-	totalRead := 0
-	var fullResponse []byte
-
-	for totalRead < 256 { // Max response size
-		buf := make([]byte, 256)
-		n, err := cam.serial.Read(buf)
-		if err != nil && err != io.EOF {
-			if totalRead > 0 {
-				break // We got some data, that's enough
-			}
-			return fmt.Errorf("read error: %w", err)
+	resp, err := cam.readResponse()
+	if err != nil {
+		if !errors.Is(err, errResponseTimeout) {
+			cam.markDisconnectedLocked()
 		}
-
-		if n > 0 {
-			fullResponse = append(fullResponse, buf[:n]...)
-			totalRead += n
-
-			// Check for end marker
-			if len(fullResponse) > 0 && fullResponse[len(fullResponse)-1] == 0xEF {
-				break
-			}
-		}
-
-		if err == io.EOF {
-			break
-		}
+		return fmt.Errorf("read error: %w", err)
 	}
 
-	fmt.Printf("Received %d bytes: %X\n", len(fullResponse), fullResponse)
-
-	// Try to interpret the response
-	if len(fullResponse) > 0 {
-		switch fullResponse[0] {
-		case 0x06:
-			fmt.Println("Response: ACK")
-		case 0x15:
-			fmt.Println("Response: NAK")
-		case 0xFE:
-			fmt.Println("Response: Status/Data response")
-			if len(fullResponse) >= 6 {
-				errorCode := string(fullResponse[3:5])
-				fmt.Printf("Error code: %s\n", errorCode)
-				if len(fullResponse) > 6 {
-					fmt.Printf("Data portion: %X\n", fullResponse[5:len(fullResponse)-1])
-				}
-			}
-		default:
-			fmt.Printf("Unknown response type: 0x%02X\n", fullResponse[0])
+	fmt.Printf("Received %d bytes: %X\n", len(resp.Data), resp.Data)
+	switch resp.Type {
+	case ResponseACK:
+		fmt.Println("Response: ACK")
+	case ResponseNAK:
+		fmt.Println("Response: NAK")
+	case ResponseStatus, ResponseError:
+		fmt.Println("Response: Status/Data response")
+		if resp.ErrorCode != "" {
+			fmt.Printf("Error code: %s (%v)\n", resp.ErrorCode, resp.Error)
+		}
+		if len(resp.Data) > 6 {
+			fmt.Printf("Data portion: %X\n", resp.Data[5:len(resp.Data)-1])
 		}
 	}
 
