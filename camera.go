@@ -32,13 +32,42 @@ const (
 	ShootingIrisPriority
 )
 
+// Duration wraps time.Duration so JSON configs can use Go duration strings
+// ("300ms", "15s"); raw nanosecond numbers keep working for back-compat.
+type Duration time.Duration
+
+func (d *Duration) UnmarshalJSON(b []byte) error {
+	if len(b) > 0 && b[0] == '"' {
+		var s string
+		if err := json.Unmarshal(b, &s); err != nil {
+			return err
+		}
+		v, err := time.ParseDuration(s)
+		if err != nil {
+			return fmt.Errorf("invalid duration %q: %w", s, err)
+		}
+		*d = Duration(v)
+		return nil
+	}
+	var n int64
+	if err := json.Unmarshal(b, &n); err != nil {
+		return fmt.Errorf("invalid duration %s: %w", b, err)
+	}
+	*d = Duration(n)
+	return nil
+}
+
+func (d Duration) MarshalJSON() ([]byte, error) {
+	return json.Marshal(time.Duration(d).String())
+}
+
 // Config holds the camera configuration
 type Config struct {
-	Port         string        `json:"port"`
-	BaudRate     int           `json:"baud_rate"`
-	ReadTimeout  time.Duration `json:"read_timeout"`
-	PowerOnDelay time.Duration `json:"power_on_delay"`
-	CameraModel  CameraModel   `json:"camera_model"`
+	Port         string      `json:"port"`
+	BaudRate     int         `json:"baud_rate"`
+	ReadTimeout  Duration    `json:"read_timeout"`
+	PowerOnDelay Duration    `json:"power_on_delay"`
+	CameraModel  CameraModel `json:"camera_model"`
 }
 
 // LoadConfig loads configuration from a file
@@ -46,8 +75,8 @@ func LoadConfig(filename string) (*Config, error) {
 	cfg := &Config{
 		Port:         "/dev/ttyUSB0",
 		BaudRate:     9600,
-		ReadTimeout:  defaultReadTimeout,
-		PowerOnDelay: powerOnBootDelay,
+		ReadTimeout:  Duration(defaultReadTimeout),
+		PowerOnDelay: Duration(powerOnBootDelay),
 		CameraModel:  ModelXU81,
 	}
 
@@ -57,11 +86,16 @@ func LoadConfig(filename string) (*Config, error) {
 
 	data, err := os.ReadFile(filename)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("reading config: %w", err)
 	}
 
 	if err := json.Unmarshal(data, &cfg); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("parsing config %s: %w", filename, err)
+	}
+
+	// A zero or negative read timeout would make response reads hot-spin.
+	if cfg.ReadTimeout <= 0 {
+		cfg.ReadTimeout = Duration(defaultReadTimeout)
 	}
 
 	return cfg, nil
@@ -464,7 +498,7 @@ func (cam *XU81Camera) openPort() error {
 		return fmt.Errorf("failed to open serial port: %w", err)
 	}
 
-	if err := port.SetReadTimeout(cam.config.ReadTimeout); err != nil {
+	if err := port.SetReadTimeout(time.Duration(cam.config.ReadTimeout)); err != nil {
 		port.Close()
 		return fmt.Errorf("failed to set read timeout: %w", err)
 	}
@@ -548,7 +582,7 @@ func (cam *XU81Camera) PowerOn() error {
 	}
 	if resp.Type == ResponseACK {
 		cam.logger.Println("Camera powering on, waiting for boot...")
-		return cam.waitPowerOn(cam.config.PowerOnDelay)
+		return cam.waitPowerOn(time.Duration(cam.config.PowerOnDelay))
 	}
 	return nil
 }
