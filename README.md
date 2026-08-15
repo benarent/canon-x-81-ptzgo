@@ -51,6 +51,8 @@ json
 -   `camera_model`: 0 for XU-80, 1 for XU-81
 -   `read_timeout` / `power_on_delay` take Go duration strings (`"300ms"`, `"15s"`);
     raw nanosecond numbers also work for backward compatibility
+-   Zero or negative `baud_rate`, `read_timeout`, and `power_on_delay` values
+    fall back to the defaults (9600 bps, 300ms, 15s)
 
 Usage
 -----
@@ -97,7 +99,7 @@ Command Reference
 
 | Command | Description |
 | --- | --- |
-| `on` | Power on camera (returns once booted, up to 15s) |
+| `on` | Power on camera (polls the camera-busy flag and returns once booted, up to 15s) |
 | `off` | Power off camera |
 
 ### Movement Control
@@ -150,7 +152,9 @@ speed. Directions: +pan = right, +tilt = up, +zoom = telephoto, +focus = near.
 **Zoom Positions:**
 
 -   0-128: Optical zoom (1x-20x)
--   129-238: Digital zoom (20x-240x, XU-81 only)
+-   129-238: Digital zoom (20x-240x, XU-81 only — rejected up front when
+    `camera_model` is 0/XU-80; the XU-81 additionally requires the
+    optical-interlocking digital zoom switch mode)
 
 ### Focus Control
 
@@ -333,6 +337,9 @@ FF      3030    XXXX     [params]    EF
 FE      3030    XXXX   [data]       EF
 ```
 
+Every answer — including for commands with no status data — is a full
+`FE ... EF` frame; the protocol has no single-byte ACK/NAK.
+
 ### Status Bits
 
 The camera status command returns a bit field:
@@ -389,7 +396,8 @@ To protect the pan/tilt mechanism (rated for 300,000 cycles), the program sends 
 `stop` command on exit:
 
 -   Always on SIGINT/SIGTERM (e.g. Ctrl-C while a command is running)
--   When leaving the interactive shell (`quit`, `exit`, Ctrl-C, Ctrl-D)
+-   When leaving the interactive shell (`quit`, `exit`, Ctrl-D). Ctrl-C at the
+    prompt just abandons the current line
 -   *Not* after one-shot commands (`./ptz-control left` keeps panning so that
     scripted sequences like `left; sleep 2; stop` still work)
 

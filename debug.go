@@ -39,19 +39,11 @@ func (cam *XU81Camera) DebugRawCommand(cmdName string, params []byte) error {
 	}
 
 	fmt.Printf("Received %d bytes: %X\n", len(resp.Data), resp.Data)
-	switch resp.Type {
-	case ResponseACK:
-		fmt.Println("Response: ACK")
-	case ResponseNAK:
-		fmt.Println("Response: NAK")
-	case ResponseStatus, ResponseError:
-		fmt.Println("Response: Status/Data response")
-		if resp.ErrorCode != "" {
-			fmt.Printf("Error code: %s (%v)\n", resp.ErrorCode, resp.Error)
-		}
-		if len(resp.Data) > 6 {
-			fmt.Printf("Data portion: %X\n", resp.Data[5:len(resp.Data)-1])
-		}
+	if resp.ErrorCode != "" {
+		fmt.Printf("Error code: %s (%v)\n", resp.ErrorCode, resp.Error)
+	}
+	if len(resp.Data) > 6 {
+		fmt.Printf("Data portion: %X\n", resp.Data[5:len(resp.Data)-1])
 	}
 
 	return nil

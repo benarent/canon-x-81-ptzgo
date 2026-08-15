@@ -17,8 +17,6 @@ const (
 	responseHeader     = 0xFE
 	deviceNum          = "3030"
 	endMarkByte        = 0xEF
-	ackByte            = 0x06
-	nakByte            = 0x15
 	defaultReadTimeout = 300 * time.Millisecond
 	responseTimeout    = 500 * time.Millisecond
 	powerOnBootDelay   = 15 * time.Second
@@ -49,19 +47,20 @@ const (
 	minSpeed          = 5
 	maxSpeed          = 3000
 	maxZoom           = 0xEE
+	maxOpticalZoom    = 0x80 // positions above this use digital zoom (XU-81 only)
 	minPanAngle       = -9000
 	maxPanAngle       = 9000
 	minTiltAngle      = -6500
 	maxTiltAngle      = 6500
 )
 
-// Response types
+// Response types. The camera has no single-byte ACK/NAK: every answer —
+// even for commands with no status — is a full FE 3030 <err> EF frame
+// (manual §5.1; "One Acknowledge per Command" means one answer frame).
 type ResponseType int
 
 const (
-	ResponseACK ResponseType = iota
-	ResponseNAK
-	ResponseStatus
+	ResponseStatus ResponseType = iota
 	ResponseError
 )
 
@@ -126,12 +125,7 @@ func (cam *XU81Camera) parseResponse(data []byte) Response {
 		return Response{Type: ResponseError, Error: errors.New("empty response")}
 	}
 
-	switch data[0] {
-	case ackByte:
-		return Response{Type: ResponseACK, Data: data}
-	case nakByte:
-		return Response{Type: ResponseNAK, Error: errors.New("NAK received")}
-	case responseHeader:
+	if data[0] == responseHeader {
 		if len(data) >= 6 && data[len(data)-1] == endMarkByte {
 			// Check error code (bytes 3-4 are ASCII hex error code)
 			errorCode := string(data[3:5])
@@ -160,7 +154,11 @@ var errResponseTimeout = errors.New("timeout waiting for response")
 // readResponse reads and parses the camera response
 func (cam *XU81Camera) readResponse() (Response, error) {
 	var buf []byte
-	deadline := time.Now().Add(responseTimeout)
+	timeout := cam.respTimeout
+	if timeout <= 0 {
+		timeout = responseTimeout
+	}
+	deadline := time.Now().Add(timeout)
 
 	for time.Now().Before(deadline) {
 		tmp := make([]byte, 32)
@@ -169,28 +167,26 @@ func (cam *XU81Camera) readResponse() (Response, error) {
 			return Response{}, fmt.Errorf("read error: %w", err)
 		}
 		if n == 0 {
+			// A real port blocks in Read up to its read timeout; guard
+			// against drivers (or mocks) that return immediately so the
+			// deadline loop can never hot-spin.
+			time.Sleep(5 * time.Millisecond)
 			continue
 		}
 		buf = append(buf, tmp[:n]...)
 
-		// Discard leading garbage until a valid response start byte
-		for len(buf) > 0 && buf[0] != ackByte && buf[0] != nakByte && buf[0] != responseHeader {
+		// Discard leading garbage until the response header
+		for len(buf) > 0 && buf[0] != responseHeader {
 			buf = buf[1:]
 		}
 		if len(buf) == 0 {
 			continue
 		}
 
-		// Check for complete response
-		if buf[0] == ackByte || buf[0] == nakByte {
-			return cam.parseResponse(buf[:1]), nil
-		}
-		if buf[0] == responseHeader {
-			// Accept the first complete frame; stale trailing bytes are
-			// dropped rather than poisoning this and later responses.
-			if i := bytes.IndexByte(buf, endMarkByte); i >= 5 {
-				return cam.parseResponse(buf[:i+1]), nil
-			}
+		// Accept the first complete frame; stale trailing bytes are
+		// dropped rather than poisoning this and later responses.
+		if i := bytes.IndexByte(buf, endMarkByte); i >= 5 {
+			return cam.parseResponse(buf[:i+1]), nil
 		}
 	}
 

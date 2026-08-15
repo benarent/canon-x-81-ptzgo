@@ -97,6 +97,12 @@ func LoadConfig(filename string) (*Config, error) {
 	if cfg.ReadTimeout <= 0 {
 		cfg.ReadTimeout = Duration(defaultReadTimeout)
 	}
+	if cfg.BaudRate <= 0 {
+		cfg.BaudRate = 9600
+	}
+	if cfg.PowerOnDelay <= 0 {
+		cfg.PowerOnDelay = Duration(powerOnBootDelay)
+	}
 
 	return cfg, nil
 }
@@ -192,6 +198,7 @@ type XU81Camera struct {
 	isConnected bool
 	mu          sync.Mutex
 	config      *Config
+	respTimeout time.Duration // overall response deadline; zero means responseTimeout
 }
 
 var _ Camera = (*XU81Camera)(nil)
@@ -576,28 +583,26 @@ func (cam *XU81Camera) sendCommand(cmd Command, params []byte) (Response, error)
 // Power control methods
 func (cam *XU81Camera) PowerOn() error {
 	c := commands["power_on"]
-	resp, err := cam.sendCommand(c, []byte{paramOn})
-	if err != nil {
+	if _, err := cam.sendCommand(c, []byte{paramOn}); err != nil {
 		return fmt.Errorf("power on failed: %w", err)
 	}
-	if resp.Type == ResponseACK {
-		cam.logger.Println("Camera powering on, waiting for boot...")
-		return cam.waitPowerOn(time.Duration(cam.config.PowerOnDelay))
-	}
-	return nil
+	cam.logger.Println("Camera powering on, waiting for boot...")
+	return cam.waitPowerOn(time.Duration(cam.config.PowerOnDelay))
 }
 
 const powerOnPollInterval = time.Second
 
-// waitPowerOn polls the camera until it reports power on, returning as soon
-// as it is ready instead of sleeping a fixed boot delay. Errors are expected
-// while booting (the camera stays silent or answers Busy), so they only
-// count once the deadline has passed.
+// waitPowerOn polls the camera until it reports ready, returning as soon as
+// it is instead of sleeping a fixed boot delay. Per manual §9.3 the power-off
+// flag clears as soon as Camera ON is accepted; actual readiness is signalled
+// by the extended-status camera-busy flag clearing (~15s). Errors are
+// expected while booting (the camera stays silent or answers Busy), so they
+// only count once the deadline has passed.
 func (cam *XU81Camera) waitPowerOn(timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	for {
-		status, err := cam.GetStatus()
-		if err == nil && status.PowerOn {
+		status, err := cam.GetExtendedStatus()
+		if err == nil && status.PowerOn && !status.CameraBusy {
 			return nil
 		}
 		if time.Now().After(deadline) {
@@ -733,6 +738,12 @@ func (cam *XU81Camera) GetPanTiltPosition() (pan, tilt int, err error) {
 func (cam *XU81Camera) SetZoomPosition(pos int) error {
 	if pos < 0 || pos > maxZoom {
 		return fmt.Errorf("zoom position must be between 0 and %d", maxZoom)
+	}
+	// Positions above the optical range use digital zoom (XU-81 only, and
+	// per manual §9.15 only in the optical-interlocking switch mode; in
+	// independent mode the camera itself rejects >80h with Parameter Error).
+	if pos > maxOpticalZoom && cam.config.CameraModel != ModelXU81 {
+		return fmt.Errorf("zoom positions above %d require digital zoom (XU-81 only)", maxOpticalZoom)
 	}
 	c := commands["zoom_pos"]
 	params := intToASCIIHex(pos, 2)
@@ -908,11 +919,11 @@ func (cam *XU81Camera) GetSystemInfo() (*SystemInfo, error) {
 	}
 	info.CameraVersion = version
 
-	serial, err := cam.GetSerialNumber()
+	serialNo, err := cam.GetSerialNumber()
 	if err != nil {
 		return nil, fmt.Errorf("serial number request: %w", err)
 	}
-	info.SerialNumber = serial
+	info.SerialNumber = serialNo
 
 	return info, nil
 }

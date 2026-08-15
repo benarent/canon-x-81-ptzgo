@@ -61,6 +61,7 @@ func newTestCamera(mock *mockSerialPort) *XU81Camera {
 		isConnected: true,
 		logger:      log.New(io.Discard, "", 0),
 		config:      &Config{CameraModel: ModelXU81},
+		respTimeout: 20 * time.Millisecond, // keep timeout tests fast
 	}
 }
 
@@ -108,9 +109,8 @@ func TestParseResponse(t *testing.T) {
 		wantType ResponseType
 		wantErr  bool
 	}{
-		{"ack", []byte{ackByte}, ResponseACK, false},
-		{"nak", []byte{nakByte}, ResponseNAK, true},
 		{"status ok", statusResponse("A00"), ResponseStatus, false},
+		{"no-status answer", statusResponse(""), ResponseStatus, false},
 		{"empty", nil, ResponseError, true},
 		{"unknown header", []byte{0x42, 0x30, 0x30, 0x30, 0x30, 0xEF}, ResponseError, true},
 		{"truncated status", []byte{responseHeader, 0x30, 0x30}, ResponseError, true},
@@ -210,14 +210,6 @@ func TestIsBusy(t *testing.T) {
 }
 
 func TestSendCommandCameraError(t *testing.T) {
-	t.Run("NAK answer", func(t *testing.T) {
-		mock := &mockSerialPort{readBuf: []byte{nakByte}}
-		cam := newTestCamera(mock)
-		if err := cam.Stop(); err == nil {
-			t.Fatal("expected error on NAK answer")
-		}
-	})
-
 	t.Run("error code answer", func(t *testing.T) {
 		// Parameter Error answer: error code chars "50" (Parameter + Busy)
 		mock := &mockSerialPort{readBuf: []byte{responseHeader, 0x30, 0x30, '5', '0', endMarkByte}}
@@ -333,7 +325,7 @@ func TestValidators(t *testing.T) {
 }
 
 func TestSendCommandFraming(t *testing.T) {
-	mock := &mockSerialPort{readBuf: []byte{ackByte}}
+	mock := &mockSerialPort{readBuf: statusResponse("")}
 	cam := newTestCamera(mock)
 
 	if err := cam.Stop(); err != nil {
@@ -492,7 +484,7 @@ func TestMoveShotMemoryDuration(t *testing.T) {
 		}
 	}
 	for _, d := range []int{0, 2, 48} {
-		mock := &mockSerialPort{readBuf: []byte{ackByte}}
+		mock := &mockSerialPort{readBuf: statusResponse("")}
 		cam := newTestCamera(mock)
 		if err := cam.MoveShotMemory(1, d); err != nil {
 			t.Errorf("duration %d should be accepted: %v", d, err)
@@ -501,7 +493,7 @@ func TestMoveShotMemoryDuration(t *testing.T) {
 }
 
 func TestDriveFraming(t *testing.T) {
-	mock := &mockSerialPort{readBuf: []byte{ackByte}}
+	mock := &mockSerialPort{readBuf: statusResponse("")}
 	cam := newTestCamera(mock)
 
 	// Max-speed pan right, everything else stopped.
@@ -535,7 +527,7 @@ func TestDriveNegativeFraming(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			mock := &mockSerialPort{readBuf: []byte{ackByte}}
+			mock := &mockSerialPort{readBuf: statusResponse("")}
 			cam := newTestCamera(mock)
 			if err := cam.Drive(tt.pan, tt.tilt, tt.zoom, tt.focus); err != nil {
 				t.Fatalf("Drive: %v", err)
@@ -612,6 +604,69 @@ func TestLoadConfigDurations(t *testing.T) {
 			t.Errorf("expected wrapped read error, got %v", err)
 		}
 	})
+
+	t.Run("zero baud rate and negative power-on delay fall back to defaults", func(t *testing.T) {
+		cfg, err := LoadConfig(writeConfig(t, `{"baud_rate":0,"power_on_delay":"-5s"}`))
+		if err != nil {
+			t.Fatalf("LoadConfig: %v", err)
+		}
+		if cfg.BaudRate != 9600 {
+			t.Errorf("BaudRate = %d, want 9600", cfg.BaudRate)
+		}
+		if got := time.Duration(cfg.PowerOnDelay); got != powerOnBootDelay {
+			t.Errorf("PowerOnDelay = %s, want default %s", got, powerOnBootDelay)
+		}
+	})
+}
+
+func TestSetZoomPositionModelGating(t *testing.T) {
+	t.Run("digital range rejected on XU-80", func(t *testing.T) {
+		mock := &mockSerialPort{}
+		cam := newTestCamera(mock)
+		cam.config.CameraModel = ModelXU80
+		if err := cam.SetZoomPosition(200); err == nil {
+			t.Error("zoom 200 should be rejected on XU-80")
+		}
+		if len(mock.writes) != 0 {
+			t.Errorf("nothing should be written on rejection, got %X", mock.writes)
+		}
+		mock.readBuf = statusResponse("")
+		if err := cam.SetZoomPosition(128); err != nil {
+			t.Errorf("optical zoom 128 should be accepted on XU-80: %v", err)
+		}
+	})
+
+	t.Run("digital range accepted on XU-81", func(t *testing.T) {
+		mock := &mockSerialPort{readBuf: statusResponse("")}
+		cam := newTestCamera(mock)
+		if err := cam.SetZoomPosition(200); err != nil {
+			t.Errorf("zoom 200 should be accepted on XU-81: %v", err)
+		}
+	})
+}
+
+func TestPowerOnWaitsForBoot(t *testing.T) {
+	// Per manual §9.3 the power-off flag clears as soon as Camera ON is
+	// accepted; readiness is the extended-status camera-busy flag clearing.
+	// Queue: Camera ON answer, then an extended status showing power on and
+	// not busy — PowerOn must poll extended status before returning.
+	mock := &mockSerialPort{responseQueue: [][]byte{
+		statusResponse(""),      // Camera ON accepted
+		statusResponse("00000"), // power on (b5 clear), not busy (b14 clear)
+	}}
+	cam := newTestCamera(mock)
+	cam.config.PowerOnDelay = Duration(2 * time.Second)
+
+	if err := cam.PowerOn(); err != nil {
+		t.Fatalf("PowerOn: %v", err)
+	}
+	if len(mock.writes) != 2 {
+		t.Fatalf("expected Camera ON + 1 status poll, got %d writes: %X", len(mock.writes), mock.writes)
+	}
+	wantPoll := []byte{0xFF, 0x30, 0x30, 0x01, 0x86, 0x30, 0xEF}
+	if !bytes.Equal(mock.writes[1], wantPoll) {
+		t.Errorf("second write = %X, want extended status request %X", mock.writes[1], wantPoll)
+	}
 }
 
 func TestWaitIdle(t *testing.T) {
@@ -629,15 +684,19 @@ func TestWaitIdle(t *testing.T) {
 }
 
 func TestReadResponseSkipsGarbage(t *testing.T) {
-	mock := &mockSerialPort{readBuf: []byte{0x00, 0x99, ackByte}}
+	frame := statusResponse("A00")
+	mock := &mockSerialPort{readBuf: append([]byte{0x00, 0x99}, frame...)}
 	cam := newTestCamera(mock)
 
 	resp, err := cam.readResponse()
 	if err != nil {
 		t.Fatalf("readResponse: %v", err)
 	}
-	if resp.Type != ResponseACK {
-		t.Errorf("type = %v, want ResponseACK", resp.Type)
+	if resp.Type != ResponseStatus {
+		t.Errorf("type = %v, want ResponseStatus", resp.Type)
+	}
+	if !bytes.Equal(resp.Data, frame) {
+		t.Errorf("data = %X, want %X", resp.Data, frame)
 	}
 }
 

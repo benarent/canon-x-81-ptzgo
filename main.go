@@ -1,8 +1,6 @@
 package main
 
 import (
-	"context"
-	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -64,16 +62,13 @@ func run() int {
 	defer cam.Close()
 
 	// Safety: a killed process must not leave the head panning — the
-	// pan/tilt mechanism is rated for 300K cycles.
-	ctx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stopSignals()
+	// pan/tilt mechanism is rated for 300K cycles. The goroutine only ever
+	// wakes on a delivered signal, so normal exits never trigger the stop.
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
 	go func() {
-		<-ctx.Done()
-		cause := context.Cause(ctx)
-		if errors.Is(cause, context.Canceled) {
-			return // normal exit via stopSignals, not a signal
-		}
-		logger.Printf("shutting down (%v): stopping camera", cause)
+		s := <-sig
+		logger.Printf("shutting down (%v): stopping camera", s)
 		cam.BestEffortStop()
 		cam.Close()
 		runCleanups()

@@ -3,8 +3,8 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"io"
 	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -602,9 +602,9 @@ func runInteractive(cam *XU81Camera) int {
 		return
 	})
 
-	historyFile := ".mycamera_history"
+	historyFile := ".ptz-control_history"
 	if home, err := os.UserHomeDir(); err == nil {
-		historyFile = home + string(os.PathSeparator) + historyFile
+		historyFile = filepath.Join(home, historyFile)
 	}
 	if f, err := os.Open(historyFile); err == nil {
 		shell.ReadHistory(f)
@@ -618,16 +618,21 @@ func runInteractive(cam *XU81Camera) int {
 		}
 	}
 	registerCleanup(func() {
-		saveHistory()
+		// Restore the terminal from raw mode before touching the filesystem.
 		shell.Close()
+		saveHistory()
 	})
 
 	fmt.Println("Interactive mode — type \"help\" for commands, Ctrl-D to quit.")
 	for {
 		input, err := shell.Prompt("> ")
-		if err == liner.ErrPromptAborted || err == io.EOF {
+		if err == liner.ErrPromptAborted {
 			fmt.Println()
-			break // ^C or Ctrl-D
+			continue // ^C abandons the current line
+		}
+		if err != nil {
+			fmt.Println()
+			break // Ctrl-D (io.EOF) or a terminal error quits
 		}
 		input = strings.TrimSpace(input)
 		if input == "" {
